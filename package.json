@@ -1,0 +1,17 @@
+{
+  "name": "inknote",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["packages/*", "apps/*", "e2e"],
+  "scripts": {
+    "dev": "npm run dev -w @inknote/web",
+    "dev:server": "npm run dev -w @inknote/server",
+    "build": "npm run build -w @inknote/web",
+    "test": "npm run test -w @inknote/core && npm run test -w @inknote/server",
+    "typecheck": "tsc -p packages/core && tsc -p apps/server && tsc -p apps/web"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
