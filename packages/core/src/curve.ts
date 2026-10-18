@@ -41,32 +41,50 @@ export class SvgPathBuilder implements PathSink {
 }
 
 /**
- * 세그먼트 i → i+1 의 3차 베지에 제어점.
+ * 세그먼트 i → i+1 의 3차 베지에 제어점 — centripetal Catmull-Rom(α=0.5) → Bézier 변환.
  *
- * Catmull-Rom 계열 스플라인이지만, 접선 방향은 이웃 현(p[i+1]-p[i-1])을 따르고
- * 접선 길이는 "현재 세그먼트 길이/3" 으로 제한한다.
- * → 점 간격이 불균일해도 overshoot(곡선이 튀어나감)가 생기지 않는다.
+ * Catmull-Rom 은 모든 입력점을 지나는 보간 스플라인이라 손글씨의 모양을 그대로 유지한다.
+ * centripetal 매개화(점 간 거리의 제곱근을 knot 간격으로 사용)는 점 간격이 불균일하거나
+ * 급하게 꺾일 때 생기는 overshoot·자기교차(cusp)를 수학적으로 방지한다 (Yuksel et al. 2011).
+ *
+ *   d1=|P1-P0|^α, d2=|P2-P1|^α, d3=|P3-P2|^α
+ *   C1 = (d1²·P2 − d2²·P0 + (2d1² + 3d1d2 + d2²)·P1) / (3d1(d1+d2))
+ *   C2 = (d3²·P1 − d2²·P3 + (2d3² + 3d3d2 + d2²)·P2) / (3d3(d3+d2))
+ *
+ * 양 끝은 반사된 가상점(P0 = 2P1−P2)을 사용해 시작·끝 접선이 자연스럽다.
  */
 export function segmentControlPoints(pts: ArrayLike<number>, i: number, n: number, out: number[]): void {
   const s = STRIDE;
-  const i0 = (i > 0 ? i - 1 : i) * s;
-  const i1 = i * s;
-  const i2 = (i + 1) * s;
-  const i3 = (i + 2 < n ? i + 2 : i + 1) * s;
-  const x1 = pts[i1], y1 = pts[i1 + 1], x2 = pts[i2], y2 = pts[i2 + 1];
-  const segLen = Math.hypot(x2 - x1, y2 - y1);
-  const k = segLen / 3;
+  const x1 = pts[i * s], y1 = pts[i * s + 1];
+  const x2 = pts[(i + 1) * s], y2 = pts[(i + 1) * s + 1];
+  const x0 = i > 0 ? pts[(i - 1) * s] : 2 * x1 - x2;
+  const y0 = i > 0 ? pts[(i - 1) * s + 1] : 2 * y1 - y2;
+  const x3 = i + 2 < n ? pts[(i + 2) * s] : 2 * x2 - x1;
+  const y3 = i + 2 < n ? pts[(i + 2) * s + 1] : 2 * y2 - y1;
 
-  let tx = x2 - pts[i0], ty = y2 - pts[i0 + 1];
-  let tl = Math.hypot(tx, ty);
-  out[0] = tl > 1e-9 ? x1 + (tx / tl) * k : x1;
-  out[1] = tl > 1e-9 ? y1 + (ty / tl) * k : y1;
-
-  tx = pts[i3] - x1;
-  ty = pts[i3 + 1] - y1;
-  tl = Math.hypot(tx, ty);
-  out[2] = tl > 1e-9 ? x2 - (tx / tl) * k : x2;
-  out[3] = tl > 1e-9 ? y2 - (ty / tl) * k : y2;
+  const d1 = Math.sqrt(Math.hypot(x1 - x0, y1 - y0));
+  const d2 = Math.sqrt(Math.hypot(x2 - x1, y2 - y1));
+  const d3 = Math.sqrt(Math.hypot(x3 - x2, y3 - y2));
+  if (d2 < 1e-6) {
+    out[0] = x1; out[1] = y1; out[2] = x2; out[3] = y2;
+    return;
+  }
+  if (d1 < 1e-6) {
+    out[0] = x1 + (x2 - x1) / 3;
+    out[1] = y1 + (y2 - y1) / 3;
+  } else {
+    const a = 2 * d1 * d1 + 3 * d1 * d2 + d2 * d2, k = 3 * d1 * (d1 + d2);
+    out[0] = (d1 * d1 * x2 - d2 * d2 * x0 + a * x1) / k;
+    out[1] = (d1 * d1 * y2 - d2 * d2 * y0 + a * y1) / k;
+  }
+  if (d3 < 1e-6) {
+    out[2] = x2 - (x2 - x1) / 3;
+    out[3] = y2 - (y2 - y1) / 3;
+  } else {
+    const b = 2 * d3 * d3 + 3 * d3 * d2 + d2 * d2, k = 3 * d3 * (d3 + d2);
+    out[2] = (d3 * d3 * x1 - d2 * d2 * x3 + b * x2) / k;
+    out[3] = (d3 * d3 * y1 - d2 * d2 * y3 + b * y2) / k;
+  }
 }
 
 /** 중심선을 베지에 곡선으로 그린다 (일정 굵기 도구: 볼펜/마카/형광펜/밑줄) */

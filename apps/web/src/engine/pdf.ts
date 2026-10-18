@@ -1,6 +1,7 @@
 // legacy 빌드: 최신 JS API 를 폴리필해 구형 iOS WKWebView / Android WebView 에서도 동작
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
+import { buildTextLines, type TextItem, type TextLine } from '@inknote/core';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -131,6 +132,41 @@ export class PdfManager {
       b.canvas.width = b.canvas.height = 0;
       this.bitmaps.delete(k);
     }
+  }
+
+  // ── 글자 줄 (밑줄 자동 맞춤용) ──
+  private textCache = new Map<string, TextLine[] | Promise<TextLine[]>>();
+
+  /** 캐시된 글자 줄 (없으면 추출을 시작하고 null) */
+  textLines(assetId: string, pageIndex: number): TextLine[] | null {
+    const key = `${assetId}:${pageIndex}`;
+    const v = this.textCache.get(key);
+    if (Array.isArray(v)) return v;
+    if (!v) {
+      const p = this.extractText(assetId, pageIndex).catch(() => [] as TextLine[]);
+      this.textCache.set(key, p);
+      void p.then((lines) => this.textCache.set(key, lines));
+    }
+    return null;
+  }
+
+  private async extractText(assetId: string, pageIndex: number): Promise<TextLine[]> {
+    const doc = await this.open(assetId);
+    if (!doc) return [];
+    const page = await doc.getPage(pageIndex + 1);
+    const vp = page.getViewport({ scale: 1 });
+    const content = await page.getTextContent();
+    const items: TextItem[] = [];
+    for (const it of content.items) {
+      if (!('str' in it) || !it.str.trim()) continue;
+      // 텍스트 행렬 × 뷰포트 행렬 → 페이지 좌표(좌상단 원점, 회전 반영)
+      const t = pdfjs.Util.transform(vp.transform, it.transform);
+      const h = Math.hypot(t[2], t[3]);
+      if (Math.abs(t[1]) > Math.abs(t[0]) * 0.05) continue; // 가로쓰기만
+      const scaleX = Math.hypot(t[0], t[1]) / Math.hypot(it.transform[0], it.transform[1] || 0) || 1;
+      items.push({ x: t[4], baseline: t[5], width: it.width * scaleX, height: h, str: it.str });
+    }
+    return buildTextLines(items);
   }
 
   destroy(): void {

@@ -41,14 +41,20 @@ function grainPattern(color: string): CanvasPattern | string {
   const g = c.getContext('2d')!;
   const img = g.createImageData(size, size);
   const r = parseInt(color.slice(1, 3), 16), gg = parseInt(color.slice(3, 5), 16), b = parseInt(color.slice(5, 7), 16);
+  // 흑연 질감: 픽셀 노이즈 + 결 방향(사선) 줄무늬 + 약한 금속광(밝은 회색 섞기)
   let seed = 1234567;
-  for (let i = 0; i < size * size; i++) {
-    seed = (seed * 16807) % 2147483647;
-    const n = seed / 2147483647;
-    img.data[i * 4] = r;
-    img.data[i * 4 + 1] = gg;
-    img.data[i * 4 + 2] = b;
-    img.data[i * 4 + 3] = Math.round(255 * (0.42 + 0.58 * n * n));
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const streak = Array.from({ length: size * 2 }, rnd);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const i = y * size + x;
+    const n = rnd();
+    const st = streak[(x + y) % (size * 2)];
+    const a = 0.25 + 0.75 * Math.min(1, n * n * 0.7 + st * 0.55);
+    const sheen = 0.18 * st;
+    img.data[i * 4] = Math.round(r + (150 - r) * sheen);
+    img.data[i * 4 + 1] = Math.round(gg + (150 - gg) * sheen);
+    img.data[i * 4 + 2] = Math.round(b + (155 - b) * sheen);
+    img.data[i * 4 + 3] = Math.round(255 * a);
   }
   g.putImageData(img, 0, 0);
   grainCtx ??= document.createElement('canvas').getContext('2d');
@@ -127,12 +133,22 @@ export function drawObject(ctx: CanvasRenderingContext2D, o: InkObject, opts: Dr
   ctx.restore();
 }
 
-/** 레이어 순서: 형광펜(잉크 아래) → 잉크/도형 → 테이프(맨 위) */
-export function drawObjects(ctx: CanvasRenderingContext2D, objs: InkObject[], hidden?: Set<string>): void {
+/** bg 레이어용: 형광펜 (잉크 아래, multiply) */
+export function drawUnderLayer(ctx: CanvasRenderingContext2D, objs: InkObject[], hidden?: Set<string>): void {
+  for (const o of objs) if (o.type === 'stroke' && o.tool === 'highlighter' && !hidden?.has(o.id)) drawObject(ctx, o);
+}
+
+/** ink 레이어용: 펜 획·도형 → 테이프(맨 위) */
+export function drawInkLayer(ctx: CanvasRenderingContext2D, objs: InkObject[], hidden?: Set<string>): void {
   const visible = hidden?.size ? objs.filter((o) => !hidden.has(o.id)) : objs;
-  for (const o of visible) if (o.type === 'stroke' && o.tool === 'highlighter') drawObject(ctx, o);
   for (const o of visible) if ((o.type === 'stroke' && o.tool !== 'highlighter') || o.type === 'shape') drawObject(ctx, o);
   for (const o of visible) if (o.type === 'tape') drawObject(ctx, o);
+}
+
+/** 한 캔버스에 모든 레이어 (썸네일용): 형광펜 → 잉크/도형 → 테이프 */
+export function drawObjects(ctx: CanvasRenderingContext2D, objs: InkObject[], hidden?: Set<string>): void {
+  drawUnderLayer(ctx, objs, hidden);
+  drawInkLayer(ctx, objs, hidden);
 }
 
 export function pageObjects(doc: InkDocument, page: Page, visible?: BBox): InkObject[] {

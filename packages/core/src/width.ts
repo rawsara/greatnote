@@ -8,7 +8,8 @@ import { STRIDE } from './model';
  *
  * - pressureFactor: 필압 곡선(gamma) 적용 후 [minRatio, 1] 로 매핑, `pressure` 로 영향도 조절
  * - velocityFactor: 빠르게 그을수록 얇아짐(실제 만년필의 잉크 흐름 모사)
- * - 필압 센서가 없는 입력(마우스/손가락)은 속도와 시작/끝 taper 로 "가상 필압"을 만든다
+ * - 필압 센서가 없는 입력(마우스/손가락)은 속도로 필압을 추정한다 (느릴수록 꾹 누른 것처럼 굵게)
+ * - 시작·끝은 항상 가늘게(taper) — 필압 입력은 짧게, 필압 없는 입력은 길게
  *
  * 계산된 비율은 포인트마다 저장(stride 의 w)되어, 모든 기기에서 동일하게 재현된다.
  */
@@ -23,7 +24,7 @@ export interface WidthProfile {
   velocity: number;
   /** 이 속도(px/ms) 이상이면 velocity 만큼 최대로 얇아짐 */
   velocityRef: number;
-  /** 필압이 없을 때 시작·끝 taper 길이 (px) */
+  /** 시작·끝 taper 길이 (px, 필압 입력은 절반) */
   taper: number;
   /** 굵기 변화 평활화 (새 값 반영 비율 0..1) */
   smoothing: number;
@@ -65,16 +66,26 @@ export class WidthEstimator {
     this.lastY = y;
     this.lastT = t;
 
-    const pr = this.hasPressure ? clamp(pressure, 0, 1) : 0.62;
+    const pr = this.hasPressure ? clamp(pressure, 0, 1) : estimatePressure(this.speed, p.velocityRef);
     const pTerm = p.minRatio + (1 - p.minRatio) * Math.pow(pr, p.gamma);
     const pressureFactor = 1 - p.pressure + p.pressure * pTerm;
     const velocityFactor = 1 - p.velocity * clamp(this.speed / p.velocityRef, 0, 1);
     let target = pressureFactor * velocityFactor;
-    if (!this.hasPressure && p.taper > 0) target *= taperEase(this.traveled / p.taper);
+    const taper = taperLength(p, this.hasPressure);
+    if (taper > 0) target *= taperEase(this.traveled / taper);
 
     this.w = this.w < 0 ? target : this.w + (target - this.w) * p.smoothing;
     return Math.round(this.w * 1000) / 1000;
   }
+}
+
+/** 속도 → 가상 필압: 멈춰 있으면 0.85, velocityRef 의 1.5배 이상이면 0.3 */
+export function estimatePressure(speed: number, velocityRef: number): number {
+  return 0.85 - 0.55 * clamp(speed / (velocityRef * 1.5), 0, 1);
+}
+
+export function taperLength(p: WidthProfile, hasPressure: boolean): number {
+  return hasPressure ? p.taper * 0.5 : p.taper;
 }
 
 function taperEase(u: number): number {

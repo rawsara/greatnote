@@ -75,3 +75,26 @@ export function resampleStroke(pts: number[], step: number): number[] {
   }
   return out;
 }
+
+/**
+ * "그리고 멈추면 직선" — 획을 시작점→끝점 직선으로 바꾼다.
+ * 수평/수직에서 ±snapDeg 이내면 정확히 수평/수직으로 맞추고, 굵기는 평균 비율을 쓴다.
+ */
+export function straightenStroke(pts: number[], snapDeg = 5): number[] {
+  const n = pts.length / STRIDE;
+  if (n < 2) return pts.slice();
+  let w = 0;
+  for (let i = 2; i < pts.length; i += STRIDE) w += pts[i];
+  w = Math.round((w / n) * 1000) / 1000;
+  const x0 = pts[0], y0 = pts[1];
+  let x1 = pts[pts.length - 3], y1 = pts[pts.length - 2];
+  const ang = (Math.atan2(y1 - y0, x1 - x0) * 180) / Math.PI;
+  const len = Math.hypot(x1 - x0, y1 - y0);
+  const snapped = Math.round(ang / 90) * 90;
+  if (Math.abs(ang - snapped) <= snapDeg) {
+    const r = (snapped * Math.PI) / 180;
+    x1 = x0 + Math.round(Math.cos(r)) * len;
+    y1 = y0 + Math.round(Math.sin(r)) * len;
+  }
+  return [x0, y0, w, x1, y1, w];
+}

@@ -9,6 +9,8 @@ import { importPdf, pickFile, saveFile } from './files';
 import { Icon } from './icons';
 import { PageSidebar } from './PageSidebar';
 import { SelectionMenu, ToolButtons, ToolOptions } from './Toolbar';
+import { ThemeButton } from './ThemeButton';
+import { usePdfDrop } from './usePdfDrop';
 
 interface Loaded {
   editor: Editor;
@@ -113,8 +115,8 @@ function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo;
     requestAnimationFrame(() => editor.scrollToPage(p.id));
   };
 
-  const insertPdf = async () => {
-    const file = await pickFile('application/pdf');
+  const insertPdf = async (dropped?: File) => {
+    const file = dropped ?? (await pickFile('application/pdf'));
     if (!file) return;
     setBusy('PDF 가져오는 중…');
     try {
@@ -130,6 +132,8 @@ function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo;
       setBusy(null);
     }
   };
+
+  const dragging = usePdfDrop((f) => void insertPdf(f));
 
   const doExport = async () => {
     setBusy('PDF 내보내는 중…');
@@ -162,11 +166,12 @@ function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo;
         <ToolButtons editor={editor} st={st} />
         <div className="tb-right">
           <button className="icon-btn" title="실행 취소 (⌘Z · 두 손가락 탭)" disabled={!st.canUndo} onClick={() => editor.undo()}><Icon.undo /></button>
-          <button className="icon-btn" title="다시 실행 (⇧⌘Z)" disabled={!st.canRedo} onClick={() => editor.redo()}><Icon.redo /></button>
+          <button className="icon-btn" title="다시 실행 (⇧⌘Z · 세 손가락 탭)" disabled={!st.canRedo} onClick={() => editor.redo()}><Icon.redo /></button>
           <span className="divider" />
           <button className="icon-btn" title="페이지 추가" onClick={addPage}><Icon.plus /></button>
-          <button className="icon-btn" title="PDF 삽입" onClick={insertPdf}><Icon.file /></button>
+          <button className="icon-btn" title="PDF 삽입 (파일을 끌어다 놓아도 됩니다)" onClick={() => insertPdf()}><Icon.file /></button>
           <button className="icon-btn" title="PDF로 내보내기" onClick={doExport}><Icon.share /></button>
+          <ThemeButton />
         </div>
       </header>
       <div className="subbar">
@@ -182,6 +187,7 @@ function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo;
         </div>
       </div>
       {busy && <div className="toast">{busy}</div>}
+      {dragging && <div className="drop-zone">PDF를 놓으면 현재 페이지 뒤에 삽입해요</div>}
     </>
   );
 }

@@ -15,6 +15,8 @@ export interface ChangeEvent {
   pages: Set<string>;
   /** 페이지 목록/메타/에셋 변경 여부 */
   structural: boolean;
+  /** 이번 변경으로 새로 생긴 객체 id (기존 객체 수정·삭제가 아님) → 화면에 덧그리기 가능 */
+  fresh: Set<string>;
 }
 
 export interface DocSnapshot {
@@ -208,6 +210,7 @@ export class InkDocument {
   private applyInternal(ops: Op[], origin: Origin): void {
     const applied: Op[] = [];
     const pages = new Set<string>();
+    const fresh = new Set<string>();
     let structural = false;
     for (const op of ops) {
       if (op.s.c > this.clock) this.clock = op.s.c;
@@ -221,6 +224,7 @@ export class InkDocument {
         if (nw) this.index(nw);
         if (old) pages.add(old.pageId);
         if (nw) pages.add(nw.pageId);
+        if (nw && !before) fresh.add(op.id);
       } else {
         structural = true;
         if (op.k === 'page') {
@@ -230,7 +234,7 @@ export class InkDocument {
       }
     }
     if (!applied.length) return;
-    const ev: ChangeEvent = { origin, ops: applied, pages, structural };
+    const ev: ChangeEvent = { origin, ops: applied, pages, structural, fresh };
     for (const l of this.listeners) l(ev);
   }
 

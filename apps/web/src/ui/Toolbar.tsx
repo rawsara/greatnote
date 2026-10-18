@@ -145,7 +145,10 @@ export function ToolOptions({ editor, st }: { editor: Editor; st: EditorUIState 
   if (t === 'lasso') {
     return (
       <div className="options">
-        <span className="hint">선택할 필기를 둘러싸세요 · 드래그로 이동 · 모서리로 크기 조절</span>
+        {st.clipboardCount > 0 && (
+          <button className="text-btn" onClick={() => editor.paste()}><Icon.paste /> 붙여넣기 ({st.clipboardCount})</button>
+        )}
+        <span className="hint">둘러싸서 선택 · 드래그로 이동 · 모서리(비율 유지)/변(한 방향) 핸들로 크기 조절</span>
       </div>
     );
   }

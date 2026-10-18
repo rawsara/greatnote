@@ -1,13 +1,13 @@
 import {
-  A4, TOOL_PRESETS, bboxIntersects, newId, selectionBBox, transformObject, affineTranslate,
-  type ChangeEvent, type InkDocument, type InkObject, type InkTool, type Page,
+  A4, TOOL_PRESETS, bboxIntersects, isHighlighter, newId, objectBBox, selectionBBox, transformObject, affineTranslate,
+  type ChangeEvent, type InkDocument, type InkObject, type InkTool, type Page, type TextLine,
 } from '@inknote/core';
 import {
   EraserGesture, InkGesture, LassoGesture, RulerGesture, ShapeGesture, TapeGesture, TransformGesture,
-  coalescedOf, drawEraserCursor, drawSelectionBox, selectionHit, tapeAt,
+  PT_PER_CM, coalescedOf, drawEraserCursor, drawSelectionBox, selectionHit, tapeAt,
 } from './gestures';
 import type { PdfManager } from './pdf';
-import { drawObjects, drawPaper, pageObjects } from './render';
+import { drawInkLayer, drawObject, drawObjects, drawPaper, drawUnderLayer, pageObjects } from './render';
 import type { EditorHost, EditorUIState, Gesture, PageRect, RulerState, Selection, SnapLine, ToolId } from './types';
 
 const GAP = 28;
@@ -24,11 +24,11 @@ function defaultState(): EditorUIState {
     tool: 'pen', inkStyles, eraserMode: 'stroke', eraserSize: 24, shapeKind: 'rect',
     shapeStyle: { color: '#1b1f3b', width: 1.8 }, tapeStyle: { color: '#f59e0b', width: 16 },
     ruler: false, penOnly: false, zoom: 1, currentPageId: null, selection: null,
-    canUndo: false, canRedo: false, docVersion: 0,
+    canUndo: false, canRedo: false, docVersion: 0, clipboardCount: 0,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? 'null');
-    if (saved) return { ...base, ...saved, inkStyles: { ...inkStyles, ...saved.inkStyles }, selection: null, ruler: false };
+    if (saved) return { ...base, ...saved, inkStyles: { ...inkStyles, ...saved.inkStyles }, selection: null, ruler: false, clipboardCount: 0 };
   } catch {
     /* 저장소 접근 불가 시 기본값 */
   }
@@ -38,20 +38,32 @@ function defaultState(): EditorUIState {
 /**
  * 캔버스 편집기.
  *
- * 렌더 레이어
- *  - base    : 페이지(속지/PDF) + 확정된 벡터 객체. 문서 변경·스크롤·줌 때만 다시 그림
- *  - overlay : 그리는 중인 획, 올가미, 선택 핸들, 자, 지우개 커서.
- *              `desynchronized` 컨텍스트(저지연 캔버스)로 입력 이벤트 안에서 즉시 그린다.
+ * 렌더 레이어 (아래 → 위, 4층)
+ *  1. bg   : 책상 배경 + 속지/PDF + 형광펜 (multiply 로 PDF 글자와 섞여 글씨를 가리지 않음)
+ *  2. ink  : 확정된 펜 획·도형·테이프
+ *  3. live : 지금 그리는 획만 (`desynchronized` 저지연 캔버스, 입력 이벤트 안에서 즉시 그림)
+ *  4. ui   : 자, 올가미 경로, 선택 상자/핸들, 지우개 커서, 길이 표시 (입력 이벤트 수신)
+ *
+ *  - 그리는 중에는 live 레이어의 현재 획만 다시 그린다.
+ *  - 펜을 떼면 새 획을 ink(형광펜은 bg) 레이어에 "덧그린다" — 문서 전체를 다시 그리지 않음.
+ *  - bg/ink 전체 다시 그리기는 스크롤·줌·원격 변경·삭제처럼 기존 내용이 바뀔 때만.
  *
  * 좌표계: screen(CSS px) ⇄ world(페이지 세로 배치) ⇄ page(pt, 객체 저장 좌표)
  */
 export class Editor implements EditorHost {
   readonly root: HTMLDivElement;
-  private base: HTMLCanvasElement;
+  private bgCanvas: HTMLCanvasElement;
+  private inkCanvas: HTMLCanvasElement;
+  private liveCanvas: HTMLCanvasElement;
+  /** 최상단 ui 레이어 — 포인터 이벤트를 받는다 */
   readonly overlay: HTMLCanvasElement;
-  private bctx: CanvasRenderingContext2D;
-  private octx: CanvasRenderingContext2D;
+  private bgctx: CanvasRenderingContext2D;
+  private ictx: CanvasRenderingContext2D;
+  private lctx: CanvasRenderingContext2D;
+  private uctx: CanvasRenderingContext2D;
   private lowLatency: boolean;
+  /** 렌더링 통계 (성능 확인/테스트용) */
+  readonly stats = { bgFull: 0, inkFull: 0, incremental: 0 };
   private dpr = 1;
   private cw = 0;
   private ch = 0;
@@ -66,7 +78,9 @@ export class Editor implements EditorHost {
   private contentH = 0;
   private fitted = false;
 
-  private baseDirty = true;
+  private bgDirty = true;
+  private inkDirty = true;
+  private liveClean = false;
   private raf = 0;
   private gesture: Gesture | null = null;
   private lingering: Gesture | null = null;
@@ -91,16 +105,23 @@ export class Editor implements EditorHost {
   ) {
     this.root = document.createElement('div');
     this.root.className = 'editor-root';
-    this.base = document.createElement('canvas');
-    this.overlay = document.createElement('canvas');
-    this.base.className = 'editor-layer';
-    this.overlay.className = 'editor-layer';
-    this.root.append(this.base, this.overlay);
+    const layer = (name: string) => {
+      const c = document.createElement('canvas');
+      c.className = `editor-layer layer-${name}`;
+      this.root.append(c);
+      return c;
+    };
+    this.bgCanvas = layer('bg');
+    this.inkCanvas = layer('ink');
+    this.liveCanvas = layer('live');
+    this.overlay = layer('ui');
     container.append(this.root);
 
-    this.bctx = this.base.getContext('2d', { alpha: false })!;
-    this.octx = this.overlay.getContext('2d', { desynchronized: true })!;
-    this.lowLatency = !!this.octx.getContextAttributes?.().desynchronized;
+    this.bgctx = this.bgCanvas.getContext('2d', { alpha: false })!;
+    this.ictx = this.inkCanvas.getContext('2d')!;
+    this.lctx = this.liveCanvas.getContext('2d', { desynchronized: true })!;
+    this.uctx = this.overlay.getContext('2d')!;
+    this.lowLatency = !!this.lctx.getContextAttributes?.().desynchronized;
 
     const on = <K extends keyof HTMLElementEventMap>(el: EventTarget, type: K | string, fn: (e: never) => void, opts?: AddEventListenerOptions) => {
       el.addEventListener(type, fn as EventListener, opts);
@@ -122,7 +143,20 @@ export class Editor implements EditorHost {
     on(window, 'keyup', (e: KeyboardEvent) => e.code === 'Space' && (this.spaceDown = false));
 
     this.cleanup.push(doc.on(this.onDocChange));
-    this.cleanup.push(pdf.onUpdate(() => this.invalidate(true)));
+    this.cleanup.push(pdf.onUpdate(() => {
+      this.bgDirty = true;
+      this.schedule();
+    }));
+    // 다크 모드 전환 시 책상 색 다시 그리기
+    const mo = new MutationObserver(() => this.invalidate(true));
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onScheme = () => this.invalidate(true);
+    mq.addEventListener('change', onScheme);
+    this.cleanup.push(() => {
+      mo.disconnect();
+      mq.removeEventListener('change', onScheme);
+    });
     const ro = new ResizeObserver(() => this.resize());
     ro.observe(container);
     this.cleanup.push(() => ro.disconnect());
@@ -156,6 +190,11 @@ export class Editor implements EditorHost {
   update(patch: Partial<EditorUIState>): void {
     if (patch.tool && patch.tool !== 'lasso' && this.state.selection) patch.selection = null;
     if (patch.ruler && !this.state.ruler) this.centerRuler();
+    // 밑줄 도구 선택 시 보이는 PDF 페이지의 글자 줄을 미리 추출
+    if (patch.tool === 'underline') {
+      const view = this.viewRect();
+      for (const r of this.rects) if (r.y < view.maxY && r.y + r.page.height > view.minY) this.textLines(r.page);
+    }
     this.syncState(patch);
     try {
       const { inkStyles, eraserMode, eraserSize, shapeKind, shapeStyle, tapeStyle, tool, penOnly } = this.state;
@@ -183,7 +222,7 @@ export class Editor implements EditorHost {
     this.cw = r.width;
     this.ch = r.height;
     this.dpr = Math.min(window.devicePixelRatio || 1, 3);
-    for (const c of [this.base, this.overlay]) {
+    for (const c of [this.bgCanvas, this.inkCanvas, this.liveCanvas, this.overlay]) {
       c.width = Math.round(this.cw * this.dpr);
       c.height = Math.round(this.ch * this.dpr);
     }
@@ -295,7 +334,12 @@ export class Editor implements EditorHost {
   // ───────────────────────── 렌더링 ─────────────────────────
 
   invalidate(base = false): void {
-    if (base) this.baseDirty = true;
+    if (base) this.bgDirty = this.inkDirty = true;
+    this.schedule();
+  }
+
+  /** 타이머 등 입력 이벤트 밖에서 live/ui 갱신 */
+  requestDraw(): void {
     this.schedule();
   }
 
@@ -305,47 +349,107 @@ export class Editor implements EditorHost {
 
   private frame = (): void => {
     this.raf = 0;
-    if (this.baseDirty) {
-      this.baseDirty = false;
-      this.renderBase();
-    }
-    this.renderOverlay();
-    // 펜을 뗀 획은 base 에 그려진 다음 프레임까지 overlay 에 남겨 깜빡임 방지
+    if (this.bgDirty) this.renderBg();
+    if (this.inkDirty) this.renderInk();
+    if (!this.liveClean) this.renderLive();
+    this.liveClean = false;
+    this.renderUI();
+    // 펜을 뗀 획은 ink 레이어에 그려진 다음 프레임까지 live 에 남겨 깜빡임 방지
     if (this.lingering) {
       this.lingering = null;
       this.schedule();
     }
   };
 
-  private renderBase(): void {
-    const ctx = this.bctx;
-    const { dpr, zoom } = this;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#ece9e3';
-    ctx.fillRect(0, 0, this.base.width, this.base.height);
-    const vx0 = -this.panX / zoom, vy0 = -this.panY / zoom;
-    const view = { minX: vx0, minY: vy0, maxX: vx0 + this.cw / zoom, maxY: vy0 + this.ch / zoom };
+  private viewRect() {
+    const vx0 = -this.panX / this.zoom, vy0 = -this.panY / this.zoom;
+    return { minX: vx0, minY: vy0, maxX: vx0 + this.cw / this.zoom, maxY: vy0 + this.ch / this.zoom };
+  }
 
+  /** 화면에 보이는 페이지마다 (페이지 좌표 변환 + 클립 + 보이는 영역) 콜백 */
+  private forVisiblePages(ctx: CanvasRenderingContext2D, fn: (rect: PageRect, local: { minX: number; minY: number; maxX: number; maxY: number }) => void): void {
+    const view = this.viewRect();
     for (const rect of this.rects) {
       const { page } = rect;
-      const pb = { minX: rect.x, minY: rect.y, maxX: rect.x + page.width, maxY: rect.y + page.height };
-      if (!bboxIntersects(pb, view)) continue;
-      // 그림자
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const [sx, sy] = this.pageToScreen(rect, 0, 0);
-      ctx.fillStyle = 'rgba(0,0,0,0.10)';
-      ctx.fillRect(sx + 1, sy + 2, page.width * zoom + 2, page.height * zoom + 2);
-
+      if (!bboxIntersects({ minX: rect.x, minY: rect.y, maxX: rect.x + page.width, maxY: rect.y + page.height }, view)) continue;
       this.pageTransform(ctx, rect);
       ctx.save();
       ctx.beginPath();
       ctx.rect(0, 0, page.width, page.height);
       ctx.clip();
-      this.drawBackground(ctx, page, zoom * dpr);
-      const local = { minX: view.minX - rect.x, minY: view.minY - rect.y, maxX: view.maxX - rect.x, maxY: view.maxY - rect.y };
-      drawObjects(ctx, pageObjects(this.doc, page, local), this.hidden);
+      fn(rect, { minX: view.minX - rect.x, minY: view.minY - rect.y, maxX: view.maxX - rect.x, maxY: view.maxY - rect.y });
       ctx.restore();
     }
+  }
+
+  private cssVar(name: string, fallback: string): string {
+    return getComputedStyle(this.root).getPropertyValue(name).trim() || fallback;
+  }
+
+  /** 1층: 책상 + 속지/PDF + 형광펜 */
+  private renderBg(): void {
+    this.bgDirty = false;
+    this.stats.bgFull++;
+    const ctx = this.bgctx;
+    const { dpr, zoom } = this;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = this.cssVar('--desk', '#ece9e3');
+    ctx.fillRect(0, 0, this.bgCanvas.width, this.bgCanvas.height);
+    const view = this.viewRect();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = this.cssVar('--page-shadow', 'rgba(0,0,0,0.10)');
+    for (const rect of this.rects) {
+      const { page } = rect;
+      if (!bboxIntersects({ minX: rect.x, minY: rect.y, maxX: rect.x + page.width, maxY: rect.y + page.height }, view)) continue;
+      const [sx, sy] = this.pageToScreen(rect, 0, 0);
+      ctx.fillRect(sx + 1, sy + 2, page.width * zoom + 2, page.height * zoom + 2);
+    }
+    this.forVisiblePages(ctx, (rect, local) => {
+      this.drawBackground(ctx, rect.page, zoom * dpr);
+      drawUnderLayer(ctx, pageObjects(this.doc, rect.page, local), this.hidden);
+    });
+  }
+
+  /** 2층: 펜 획·도형·테이프 */
+  private renderInk(): void {
+    this.inkDirty = false;
+    this.stats.inkFull++;
+    const ctx = this.ictx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.inkCanvas.width, this.inkCanvas.height);
+    this.forVisiblePages(ctx, (rect, local) => drawInkLayer(ctx, pageObjects(this.doc, rect.page, local), this.hidden));
+  }
+
+  /**
+   * 새로 생긴 객체만 덧그리기. 기존 내용의 순서를 깨지 않는 경우에만 사용한다:
+   *  - 로컬에서 방금 만든 객체(가장 큰 z)만 있는 변경
+   *  - 형광펜은 bg 레이어에 multiply (형광펜끼리는 순서 무관)
+   *  - 펜 획이 기존 테이프와 겹치면 테이프가 위에 있어야 하므로 전체 다시 그리기
+   */
+  private tryIncremental(e: ChangeEvent): boolean {
+    if (e.origin !== 'local' || e.structural || !e.fresh.size || this.bgDirty || this.inkDirty || this.hidden.size) return false;
+    if (e.ops.some((op) => op.k !== 'obj' || !op.v || !e.fresh.has(op.id))) return false;
+    const objs = e.ops.map((op) => op.v as InkObject);
+    const hasTape = objs.some((o) => o.type === 'tape');
+    for (const o of objs) {
+      if (!this.rectOf(o.pageId)) return false;
+      if (o.type === 'tape' || isHighlighter(o)) continue;
+      if (hasTape) return false;
+      if (this.doc.query(o.pageId, objectBBox(o)).some((t) => t.type === 'tape')) return false;
+    }
+    for (const o of objs) {
+      const rect = this.rectOf(o.pageId)!;
+      const ctx = isHighlighter(o) ? this.bgctx : this.ictx;
+      this.pageTransform(ctx, rect);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, rect.page.width, rect.page.height);
+      ctx.clip();
+      drawObject(ctx, o);
+      ctx.restore();
+    }
+    this.stats.incremental++;
+    return true;
   }
 
   drawBackground(ctx: CanvasRenderingContext2D, page: Page, pixelScale: number): void {
@@ -374,27 +478,37 @@ export class Editor implements EditorHost {
     drawObjects(ctx, this.doc.objects(pageId));
   }
 
-  private renderOverlay(): void {
-    const ctx = this.octx;
+  /** 3층: 그리는 중인 획 */
+  private renderLive(): void {
+    const ctx = this.lctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.liveCanvas.width, this.liveCanvas.height);
+    const mode = this.gesture?.blendMultiply || this.lingering?.blendMultiply ? 'multiply' : 'normal';
+    if (this.liveCanvas.style.mixBlendMode !== mode) this.liveCanvas.style.mixBlendMode = mode;
+    for (const g of [this.lingering, this.gesture]) {
+      if (!g?.drawLive) continue;
+      ctx.save();
+      g.drawLive(ctx);
+      ctx.restore();
+    }
+  }
+
+  /** 4층: 자, 선택 상자, 올가미, 커서, 길이 표시 */
+  private renderUI(): void {
+    const ctx = this.uctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.overlay.width, this.overlay.height);
-    const multiply = !!(this.gesture?.blendMultiply || this.lingering?.blendMultiply);
-    const mode = multiply ? 'multiply' : 'normal';
-    if (this.overlay.style.mixBlendMode !== mode) this.overlay.style.mixBlendMode = mode;
-
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     if (this.state.ruler) this.drawRuler(ctx);
-
     const sel = this.state.selection;
     if (sel && !(this.gesture instanceof TransformGesture)) {
       const rect = this.rectOf(sel.pageId);
       const objs = sel.ids.map((id) => this.doc.object(id)).filter((o): o is InkObject => !!o);
       if (rect && objs.length) drawSelectionBox(ctx, this, rect, selectionBBox(objs));
     }
-    for (const g of [this.lingering, this.gesture]) {
-      if (!g) continue;
+    if (this.gesture?.drawUI) {
       ctx.save();
-      g.drawOverlay(ctx);
+      this.gesture.drawUI(ctx);
       ctx.restore();
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     }
@@ -403,11 +517,17 @@ export class Editor implements EditorHost {
     }
   }
 
-  /** 입력 이벤트 안에서 overlay 즉시 갱신 (저지연 캔버스 지원 시) */
+  /** 입력 이벤트 안에서 live 레이어 즉시 갱신 (저지연 캔버스 지원 시), ui 는 다음 프레임 */
   private drawNow(): void {
-    if (this.lowLatency && !this.baseDirty) {
-      this.renderOverlay();
-    } else this.schedule();
+    if (this.lowLatency && !this.bgDirty && !this.inkDirty) {
+      this.renderLive();
+      this.liveClean = true;
+    }
+    this.schedule();
+  }
+
+  textLines(page: Page): TextLine[] | null {
+    return page.bg.kind === 'pdf' ? this.pdf.textLines(page.bg.assetId, page.bg.pageIndex) : null;
   }
 
   // ───────────────────────── 자(ruler) ─────────────────────────
@@ -472,13 +592,14 @@ export class Editor implements EditorHost {
     ctx.roundRect(-L / 2, -T / 2, L, T, 8);
     ctx.fill();
     ctx.stroke();
-    // 눈금: 1mm 단위(현재 줌 기준)
-    const mm = (72 / 25.4) * this.zoom;
-    if (mm > 2.5) {
+    // 눈금: 실제 크기 1mm 단위, 1cm 마다 숫자 (현재 줌 기준)
+    const mm = (PT_PER_CM / 10) * this.zoom;
+    if (mm > 2) {
+      const n = Math.floor(L / mm);
+      const x0 = -L / 2 + 10;
       ctx.beginPath();
-      const n = Math.floor(L / 2 / mm);
-      for (let i = -n; i <= n; i++) {
-        const x = i * mm;
+      for (let i = 0; i <= n && x0 + i * mm <= L / 2 - 10; i++) {
+        const x = x0 + i * mm;
         const h = i % 10 === 0 ? 14 : i % 5 === 0 ? 9 : 5;
         ctx.moveTo(x, -T / 2);
         ctx.lineTo(x, -T / 2 + h);
@@ -486,6 +607,12 @@ export class Editor implements EditorHost {
         ctx.lineTo(x, T / 2 - h);
       }
       ctx.stroke();
+      ctx.fillStyle = '#555';
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      const every = mm * 10 < 22 ? 5 : 1; // 너무 촘촘하면 5cm 마다
+      for (let c = 0; x0 + c * mm * 10 <= L / 2 - 10; c += every) ctx.fillText(c === 0 ? '0 cm' : String(c), x0 + c * mm * 10, -T / 2 + 15);
     }
     ctx.fillStyle = '#333';
     ctx.font = '600 13px system-ui, sans-serif';
@@ -513,6 +640,7 @@ export class Editor implements EditorHost {
   }
 
   setHidden(ids: string[]): void {
+    if (!ids.length && !this.hidden.size) return;
     this.hidden.clear();
     ids.forEach((id) => this.hidden.add(id));
     this.invalidate(true);
@@ -537,6 +665,7 @@ export class Editor implements EditorHost {
 
   copySelection(): void {
     this.clipboard = this.selectedObjects();
+    this.syncState({ clipboardCount: this.clipboard.length });
   }
 
   duplicateSelection(): void {
@@ -591,7 +720,8 @@ export class Editor implements EditorHost {
       selection,
       docVersion: this.state.docVersion + 1,
     });
-    this.invalidate(true);
+    if (!this.tryIncremental(e)) this.invalidate(true);
+    else this.schedule();
   };
 
   private createGesture(e: PointerEvent, sx: number, sy: number): Gesture | null {
@@ -758,6 +888,7 @@ export class Editor implements EditorHost {
     const { start, maxTouches, moved } = this.navInfo;
     if (moved || e.timeStamp - start > 350) return;
     if (maxTouches === 2) return this.undo(); // 두 손가락 탭 = 실행 취소
+    if (maxTouches === 3) return this.redo(); // 세 손가락 탭 = 다시 실행
     if (maxTouches === 1) {
       // 한 손가락 탭: 테이프 가림/보임 토글
       const [sx, sy] = this.local(e);

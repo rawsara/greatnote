@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { A4, type PaperKind, type RemoteDocInfo } from '@inknote/core';
 import { getServerUrl, httpBase, setServerUrl, type DocMetaRecord, type Repo } from '../storage/repo';
 import { importPdf, pickFile } from './files';
+import { ThemeButton } from './ThemeButton';
+import { usePdfDrop } from './usePdfDrop';
 import { Icon } from './icons';
 
 interface Item {
@@ -54,8 +56,8 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
     onOpen(doc.id);
   };
 
-  const fromPdf = async () => {
-    const file = await pickFile('application/pdf');
+  const fromPdf = async (dropped?: File) => {
+    const file = dropped ?? (await pickFile('application/pdf'));
     if (!file) return;
     setBusy(true);
     try {
@@ -73,6 +75,8 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
     }
   };
 
+  const dragging = usePdfDrop((f) => void fromPdf(f));
+
   const remove = async (it: Item) => {
     if (!confirm(`"${it.title}"을(를) 이 기기에서 삭제할까요?`)) return;
     await repo.remove(it.id);
@@ -81,15 +85,17 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
 
   return (
     <div className="library">
+      {dragging && <div className="drop-zone">PDF를 놓으면 새 노트로 열어요</div>}
       <header className="lib-header">
         <h1>InkNote</h1>
         <div className="lib-actions">
           <span className={`sync-badge ${remoteState === 'ok' ? 'synced' : remoteState === 'error' ? 'offline' : 'local'}`}>
             <Icon.cloud /> {remoteState === 'ok' ? '서버 연결됨' : remoteState === 'error' ? '서버 연결 실패' : '로컬 전용'}
           </span>
+          <ThemeButton />
           <button className="icon-btn" title="동기화 설정" onClick={() => setSettingsOpen((v) => !v)}><Icon.settings /></button>
           <button className="primary-btn" onClick={() => setNewOpen((v) => !v)}><Icon.plus /> 새 노트</button>
-          <button className="secondary-btn" onClick={fromPdf} disabled={busy}><Icon.file /> {busy ? '가져오는 중…' : 'PDF 가져오기'}</button>
+          <button className="secondary-btn" onClick={() => fromPdf()} disabled={busy}><Icon.file /> {busy ? '가져오는 중…' : 'PDF 가져오기'}</button>
         </div>
       </header>
 
@@ -123,7 +129,7 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
       )}
 
       <main className="grid">
-        {items.length === 0 && <p className="empty">노트가 없습니다. “새 노트” 또는 “PDF 가져오기”로 시작하세요.</p>}
+        {items.length === 0 && <p className="empty">노트가 없습니다. “새 노트”, “PDF 가져오기” 또는 PDF 파일을 이 화면에 끌어다 놓으세요.</p>}
         {items.map((it) => (
           <div key={it.id} className="card">
             <button className="card-cover" onClick={() => onOpen(it.id)} aria-label={`${it.title} 열기`}>

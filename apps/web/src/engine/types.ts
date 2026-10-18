@@ -1,4 +1,4 @@
-import type { EraserMode, InkDocument, InkTool, Page, ShapeKind } from '@inknote/core';
+import type { EraserMode, InkDocument, InkTool, Page, ShapeKind, TextLine } from '@inknote/core';
 
 export type ToolId = InkTool | 'eraser' | 'lasso' | 'shape' | 'tape';
 
@@ -25,6 +25,8 @@ export interface EditorUIState {
   canUndo: boolean;
   canRedo: boolean;
   docVersion: number;
+  /** 클립보드에 복사된 객체 수 (붙여넣기 버튼 표시용) */
+  clipboardCount: number;
 }
 
 /** 월드(레이아웃) 좌표에서의 페이지 위치 */
@@ -54,12 +56,15 @@ export interface SnapLine {
 export interface Gesture {
   readonly pointerId: number;
   readonly pointerType: string;
-  /** 형광펜 라이브 미리보기는 overlay 에 multiply 블렌딩이 필요 */
+  /** 형광펜 라이브 미리보기는 live 레이어에 multiply 블렌딩이 필요 */
   readonly blendMultiply?: boolean;
   move(e: PointerEvent, coalesced: PointerEvent[], predicted: PointerEvent[]): void;
   up(e: PointerEvent): void;
   cancel(): void;
-  drawOverlay(ctx: CanvasRenderingContext2D): void;
+  /** live 레이어(저지연): 그리는 중인 획·도형·변환 미리보기 */
+  drawLive?(ctx: CanvasRenderingContext2D): void;
+  /** ui 레이어: 올가미 경로, 선택 상자, 지우개 커서, 길이 표시 */
+  drawUI?(ctx: CanvasRenderingContext2D): void;
 }
 
 export interface EditorHost {
@@ -76,5 +81,9 @@ export interface EditorHost {
   setSelection(sel: Selection | null): void;
   setHidden(ids: string[]): void;
   invalidate(base?: boolean): void;
+  /** 입력 이벤트 밖(타이머 등)에서 live/ui 레이어 갱신 요청 */
+  requestDraw(): void;
   rulerMoved(): void;
+  /** PDF 페이지의 글자 줄 (추출 전이면 null, 추출을 시작함) */
+  textLines(page: Page): TextLine[] | null;
 }
