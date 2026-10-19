@@ -1,7 +1,82 @@
 import {
   TOOL_PRESETS, buildOutline, traceCenterline, traceOutline, traceShape, traceTape,
-  type BBox, type InkDocument, type InkObject, type Page, type PaperKind,
+  type BBox, type ImageObj, type InkDocument, type InkObject, type Page, type PaperKind, type TextObj,
 } from '@inknote/core';
+
+// ── 이미지: 에셋 id → 디코딩된 이미지 (ImageManager 가 등록) ──
+let imageSource: (assetId: string) => CanvasImageSource | null = () => null;
+export function setImageSource(fn: (assetId: string) => CanvasImageSource | null): void {
+  imageSource = fn;
+}
+
+export const TEXT_FONT = `system-ui, -apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', sans-serif`;
+export const TEXT_LINE = 1.28;
+
+export function textFont(o: Pick<TextObj, 'bold' | 'fontSize'>): string {
+  return `${o.bold ? '700 ' : ''}${o.fontSize}px ${TEXT_FONT}`;
+}
+
+const layoutCache = new WeakMap<TextObj, string[]>();
+let measureCtx: CanvasRenderingContext2D | null = null;
+
+/** 줄바꿈: 공백 단위, 한 단어가 폭을 넘으면 글자 단위 (한글·긴 영단어) */
+export function layoutText(o: TextObj): string[] {
+  let lines = layoutCache.get(o);
+  if (lines) return lines;
+  measureCtx ??= document.createElement('canvas').getContext('2d');
+  const ctx = measureCtx!;
+  ctx.font = textFont(o);
+  lines = [];
+  const fits = (t: string) => ctx.measureText(t).width <= o.w;
+  for (const para of o.text.split('\n')) {
+    let cur = '';
+    for (const word of para.split(/(\s+)/)) {
+      if (!word) continue;
+      if (fits(cur + word)) {
+        cur += word;
+        continue;
+      }
+      if (cur.trim()) {
+        lines.push(cur.trimEnd());
+        cur = word.trimStart();
+      } else cur += word;
+      // 단어 하나가 폭보다 길면 글자 단위로 자름 (한글 문장, 긴 영단어)
+      while (!fits(cur) && cur.length > 1) {
+        let k = cur.length - 1;
+        while (k > 1 && !fits(cur.slice(0, k))) k--;
+        lines.push(cur.slice(0, k));
+        cur = cur.slice(k);
+      }
+    }
+    lines.push(cur.trimEnd());
+  }
+  layoutCache.set(o, lines);
+  return lines;
+}
+
+export function drawText(ctx: CanvasRenderingContext2D, o: TextObj): void {
+  ctx.font = textFont(o);
+  ctx.fillStyle = o.color;
+  ctx.textBaseline = 'top';
+  const lh = o.fontSize * TEXT_LINE;
+  layoutText(o).forEach((line, i) => ctx.fillText(line, o.x, o.y + i * lh + (lh - o.fontSize) / 2));
+}
+
+function drawImageObj(ctx: CanvasRenderingContext2D, o: ImageObj): void {
+  const src = imageSource(o.assetId);
+  ctx.globalAlpha = o.opacity;
+  if (src) {
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, o.x, o.y, o.w, o.h);
+    return;
+  }
+  // 아직 로딩 중이거나 이 기기에서 열 수 없는 형식(HEIC 등)
+  ctx.fillStyle = '#eef1f5';
+  ctx.fillRect(o.x, o.y, o.w, o.h);
+  ctx.strokeStyle = '#b8c2cc';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(o.x, o.y, o.w, o.h);
+}
 
 /**
  * 벡터 객체 → Canvas2D 렌더링.
@@ -13,7 +88,8 @@ const pathCache = new WeakMap<InkObject, Path2D>();
 
 function buildPath(o: InkObject): Path2D {
   const p = new Path2D();
-  if (o.type === 'stroke') {
+  if (o.type === 'image' || o.type === 'text') p.rect(o.x, o.y, o.w, o.h);
+  else if (o.type === 'stroke') {
     if (TOOL_PRESETS[o.tool].variable) traceOutline(p, buildOutline(o.pts, o.width));
     else traceCenterline(p, o.pts);
   } else if (o.type === 'shape') traceShape(p, o);
@@ -72,6 +148,13 @@ export interface DrawOpts {
 }
 
 export function drawObject(ctx: CanvasRenderingContext2D, o: InkObject, opts: DrawOpts = {}): void {
+  if (o.type === 'image' || o.type === 'text') {
+    ctx.save();
+    if (o.type === 'image') drawImageObj(ctx, o);
+    else drawText(ctx, o);
+    ctx.restore();
+    return;
+  }
   const path = objectPath(o, opts.cache ?? true);
   ctx.save();
   switch (o.type) {
@@ -138,10 +221,10 @@ export function drawUnderLayer(ctx: CanvasRenderingContext2D, objs: InkObject[],
   for (const o of objs) if (o.type === 'stroke' && o.tool === 'highlighter' && !hidden?.has(o.id)) drawObject(ctx, o);
 }
 
-/** ink 레이어용: 펜 획·도형 → 테이프(맨 위) */
+/** ink 레이어용: 펜 획·도형·이미지·텍스트 (z 순서) → 테이프(맨 위) */
 export function drawInkLayer(ctx: CanvasRenderingContext2D, objs: InkObject[], hidden?: Set<string>): void {
   const visible = hidden?.size ? objs.filter((o) => !hidden.has(o.id)) : objs;
-  for (const o of visible) if ((o.type === 'stroke' && o.tool !== 'highlighter') || o.type === 'shape') drawObject(ctx, o);
+  for (const o of visible) if (o.type !== 'tape' && !(o.type === 'stroke' && o.tool === 'highlighter')) drawObject(ctx, o);
   for (const o of visible) if (o.type === 'tape') drawObject(ctx, o);
 }
 

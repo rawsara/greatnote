@@ -3,7 +3,8 @@ import { A4, type PaperKind, type RemoteDocInfo } from '@inknote/core';
 import { getServerUrl, httpBase, setServerUrl, type DocMetaRecord, type Repo } from '../storage/repo';
 import { importPdf, pickFile } from './files';
 import { ThemeButton } from './ThemeButton';
-import { usePdfDrop } from './usePdfDrop';
+import { isPdf, usePdfDrop } from './usePdfDrop';
+import { importGoodnotes, isGoodnotesFile, type GoodnotesImportResult } from '../import/goodnotes';
 import { Icon } from './icons';
 
 interface Item {
@@ -24,6 +25,7 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [server, setServer] = useState(getServerUrl());
   const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<GoodnotesImportResult | null>(null);
 
   const refresh = useCallback(async () => {
     const local: DocMetaRecord[] = await repo.list();
@@ -75,7 +77,24 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
     }
   };
 
-  const dragging = usePdfDrop((f) => void fromPdf(f));
+  const fromGoodnotes = async (dropped?: File) => {
+    const file = dropped ?? (await pickFile('.goodnotes,application/zip,application/octet-stream'));
+    if (!file) return;
+    setBusy(true);
+    try {
+      setReport(await importGoodnotes(file, repo));
+      void refresh();
+    } catch (e) {
+      alert(`굿노트 파일을 가져올 수 없습니다: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dragging = usePdfDrop(
+    (f) => void (isGoodnotesFile(f) ? fromGoodnotes(f) : fromPdf(f)),
+    (f) => isPdf(f) || isGoodnotesFile(f),
+  );
 
   const remove = async (it: Item) => {
     if (!confirm(`"${it.title}"을(를) 이 기기에서 삭제할까요?`)) return;
@@ -85,7 +104,22 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
 
   return (
     <div className="library">
-      {dragging && <div className="drop-zone">PDF를 놓으면 새 노트로 열어요</div>}
+      {dragging && <div className="drop-zone">PDF나 굿노트(.goodnotes) 파일을 놓으면 새 노트로 열어요</div>}
+      {report && (
+        <div className="panel import-report" role="status">
+          <div>
+            <strong>“{report.title}” 가져오기 완료</strong> · {report.pages}쪽
+            <div className="card-sub">
+              {Object.entries(report.stats).map(([k, v]) => `${k} ${v.toLocaleString()}`).join(' · ')}
+            </div>
+            {report.warnings.map((w) => <div key={w} className="warn">⚠ {w}</div>)}
+          </div>
+          <div className="lib-actions">
+            <button className="primary-btn" onClick={() => onOpen(report.docId)}>열기</button>
+            <button className="secondary-btn" onClick={() => setReport(null)}>닫기</button>
+          </div>
+        </div>
+      )}
       <header className="lib-header">
         <h1>InkNote</h1>
         <div className="lib-actions">
@@ -96,6 +130,7 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
           <button className="icon-btn" title="동기화 설정" onClick={() => setSettingsOpen((v) => !v)}><Icon.settings /></button>
           <button className="primary-btn" onClick={() => setNewOpen((v) => !v)}><Icon.plus /> 새 노트</button>
           <button className="secondary-btn" onClick={() => fromPdf()} disabled={busy}><Icon.file /> {busy ? '가져오는 중…' : 'PDF 가져오기'}</button>
+          <button className="secondary-btn" onClick={() => fromGoodnotes()} disabled={busy}><Icon.import /> 굿노트 가져오기</button>
         </div>
       </header>
 
@@ -129,7 +164,7 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
       )}
 
       <main className="grid">
-        {items.length === 0 && <p className="empty">노트가 없습니다. “새 노트”, “PDF 가져오기” 또는 PDF 파일을 이 화면에 끌어다 놓으세요.</p>}
+        {items.length === 0 && <p className="empty">노트가 없습니다. “새 노트”, “PDF 가져오기”, “굿노트 가져오기” 또는 파일을 이 화면에 끌어다 놓으세요.</p>}
         {items.map((it) => (
           <div key={it.id} className="card">
             <button className="card-cover" onClick={() => onOpen(it.id)} aria-label={`${it.title} 열기`}>

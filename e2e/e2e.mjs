@@ -2,6 +2,7 @@ import { chromium } from 'playwright-core';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const OUT = process.env.E2E_OUT ?? path.join(path.dirname(new URL(import.meta.url).pathname), 'out');
 fs.mkdirSync(OUT, { recursive: true });
@@ -18,6 +19,7 @@ const A = await ctxA.newPage();
 const pageErrors = [];
 A.on('pageerror', (e) => { pageErrors.push(String(e)); console.error('PAGEERROR A', e); });
 A.on('console', (m) => m.type() === 'error' && console.error('CONSOLE A', m.text()));
+A.on('dialog', (d) => { pageErrors.push('dialog: ' + d.message()); console.error('DIALOG A', d.message()); void d.dismiss(); });
 const cdpA = await ctxA.newCDPSession(A);
 
 const objCount = (p) => p.evaluate(() => window.__inknote.doc.objects(window.__inknote.doc.pages[0].id).length);
@@ -238,14 +240,14 @@ async function fingerTap(cdp, p, n) {
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await p.waitForTimeout(150);
 }
-const tapeState = (p) => p.evaluate(() => window.__inknote.doc.objects(window.__inknote.doc.pages[0].id).find((o) => o.type === 'tape').revealed);
 assert((await B.evaluate(() => window.__inknote.editor.state.penOnly)) === true, 'pen detected → fingers only scroll (palm rejection)');
 await fingerTap(cdpB, B, 2);
-assert((await tapeState(B)) === true, 'two-finger tap undoes last action');
+const tapeIs = (v) => B.waitForFunction((v) => window.__inknote.doc.objects(window.__inknote.doc.pages[0].id).find((o) => o.type === 'tape').revealed === v, v, { timeout: 5000 }).then(() => true, () => false);
+assert(await tapeIs(true), 'two-finger tap undoes last action');
 await A.waitForFunction(() => window.__inknote.doc.objects(window.__inknote.doc.pages[0].id).find((o) => o.type === 'tape').revealed === true, null, { timeout: 5000 });
 log('OK undo on device B propagated to device A');
 await fingerTap(cdpB, B, 3);
-assert((await tapeState(B)) === false, 'three-finger tap redoes');
+assert(await tapeIs(false), 'three-finger tap redoes');
 
 // ───────────── 5. PDF 가져오기 → 필기 → 내보내기 ─────────────
 const src = await PDFDocument.create();
@@ -419,6 +421,56 @@ await A.screenshot({ path: path.join(OUT, '12-dropped-dark.png') });
 await A.getByTitle('라이브러리').click();
 await A.waitForTimeout(400);
 await A.screenshot({ path: path.join(OUT, '08-library.png') });
+
+// ───────────── 8. 굿노트 가져오기 (합성 파일, 한글 파일명으로 드래그 앤 드롭) ─────────────
+const gnPath = path.join(OUT, 'sample.goodnotes');
+execFileSync('npx', ['tsx', path.join(path.dirname(new URL(import.meta.url).pathname), 'make-goodnotes.ts'), gnPath]);
+await A.evaluate(() => { location.hash = ''; });
+await A.getByRole('button', { name: '새 노트', exact: true }).waitFor();
+const gnB64 = fs.readFileSync(gnPath).toString('base64');
+await A.evaluate((b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const dt = new DataTransfer();
+  dt.items.add(new File([bytes], '내 굿노트.goodnotes', { type: '' }));
+  document.dispatchEvent(new DragEvent('dragenter', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  document.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+}, gnB64);
+await A.locator('.import-report').waitFor({ timeout: 20000 });
+const reportText = await A.locator('.import-report').innerText();
+log('goodnotes report:', reportText.replace(/\n/g, ' | '));
+assert(reportText.includes('내 굿노트') && reportText.includes('지운 획(제외) 1'), 'goodnotes import report (Korean file name, erased strokes skipped)');
+await A.getByRole('button', { name: '열기', exact: true }).click();
+await A.waitForFunction(() => window.__inknote?.doc.meta.title === '내 굿노트' && window.__inknote.editor.rects.length === 1);
+const gn = await A.evaluate(() => {
+  const d = window.__inknote.doc, p = d.pages[0], objs = d.objects(p.id);
+  return { w: p.width, h: p.height, bg: p.bg.kind, types: objs.reduce((m, o) => ((m[o.type] = (m[o.type] || 0) + 1), m), {}),
+    flow: objs.find((o) => o.type === 'text' && o.flow)?.text, box: objs.find((o) => o.type === 'text' && !o.flow)?.text,
+    group: objs.filter((o) => o.group).length, assets: d.assets().map((a) => a.kind).sort() };
+});
+log('goodnotes page', JSON.stringify(gn));
+assert(Math.abs(gn.w - 841.5) < 0.1 && gn.bg === 'pdf' && gn.types.image === 1 && gn.flow === 'Title' && gn.box === '한글 ABC' && gn.group === 1, 'paper size, template, image, page text, Korean text box, sticker group');
+assert(JSON.stringify(gn.assets) === '["image","pdf"]', 'template PDF and image stored as assets');
+
+// 텍스트 도구로 새 상자
+await A.keyboard.press('x');
+const [[gx, gy]] = await toScreen(A, [[60, 520]]);
+await A.mouse.click(gx, gy);
+await A.locator('.text-editor').waitFor();
+await A.keyboard.type('E2E 텍스트');
+await A.keyboard.press('Escape');
+assert(await A.evaluate(() => { const d = window.__inknote.doc; return d.objects(d.pages[0].id).some((o) => o.type === 'text' && o.text === 'E2E 텍스트'); }), 'text tool creates a text box');
+
+// 이미지 삽입 (브라우저에서 만든 PNG)
+const png = Buffer.from(await A.evaluate(() => { const c = document.createElement('canvas'); c.width = 80; c.height = 40; const g = c.getContext('2d'); g.fillStyle = '#4a90e2'; g.fillRect(0, 0, 80, 40); return c.toDataURL('image/png').split(',')[1]; }), 'base64');
+const [imgChooser] = await Promise.all([A.waitForEvent('filechooser'), A.getByTitle('이미지 삽입').click()]);
+await imgChooser.setFiles({ name: 'blue.png', mimeType: 'image/png', buffer: png });
+await A.waitForFunction(() => { const d = window.__inknote.doc; return d.objects(d.pages[0].id).filter((o) => o.type === 'image').length === 2; });
+assert(true, 'insert image');
+await A.waitForTimeout(600);
+await A.screenshot({ path: path.join(OUT, '13-goodnotes-import.png') });
+const [gnDl] = await Promise.all([A.waitForEvent('download'), A.getByTitle('PDF로 내보내기').click()]);
+const gnPdf = await PDFDocument.load(fs.readFileSync(await gnDl.path()));
+assert(gnPdf.getPageCount() === 1 && Math.abs(gnPdf.getPage(0).getSize().width - 841.5) < 1, 'export imported note to PDF at paper size');
 
 await browser.close();
 assert(pageErrors.length === 0, `no uncaught page errors (${pageErrors.length})`);

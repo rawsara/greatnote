@@ -16,3 +16,4 @@ export * from './selection';
 export * from './document';
 export * from './protocol';
 export * from './textsnap';
+export * from './goodnotes';

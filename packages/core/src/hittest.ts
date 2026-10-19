@@ -27,6 +27,10 @@ export function objectBBox(o: InkObject): BBox {
     case 'tape':
       b = bboxOfFlat(tapePolygon(o), 2, 1);
       break;
+    case 'image':
+    case 'text':
+      b = { minX: o.x, minY: o.y, maxX: o.x + o.w, maxY: o.y + o.h };
+      break;
   }
   bboxCache.set(o, b);
   return b;
@@ -39,7 +43,13 @@ export function objectPoints(o: InkObject): number[] {
   if (o.type === 'stroke') return o.pts;
   let p = polyCache.get(o);
   if (!p) {
-    p = o.type === 'shape' ? shapeToPolyline(o) : [o.x1, o.y1, 1, (o.x1 + o.x2) / 2, (o.y1 + o.y2) / 2, 1, o.x2, o.y2, 1];
+    if (o.type === 'shape') p = shapeToPolyline(o);
+    else if (o.type === 'tape') p = [o.x1, o.y1, 1, (o.x1 + o.x2) / 2, (o.y1 + o.y2) / 2, 1, o.x2, o.y2, 1];
+    else {
+      // 이미지·텍스트: 3×3 격자 점 (올가미 포함 판정용)
+      p = [];
+      for (let i = 0; i <= 2; i++) for (let j = 0; j <= 2; j++) p.push(o.x + (o.w * i) / 2, o.y + (o.h * j) / 2, 1);
+    }
     polyCache.set(o, p);
   }
   return p;
@@ -47,6 +57,8 @@ export function objectPoints(o: InkObject): number[] {
 
 /** 지우개가 지나간 선분 (ax,ay)-(bx,by), 반경 r 에 객체가 닿는지 */
 export function hitObject(o: InkObject, ax: number, ay: number, bx: number, by: number, r: number): boolean {
+  // 이미지·텍스트는 지우개 대상이 아님 (굿노트와 같은 동작) — 올가미로 선택해 삭제
+  if (o.type === 'image' || o.type === 'text') return false;
   if (o.type === 'tape') {
     const lim = r + o.thickness / 2;
     return distSegmentToSegmentSq(ax, ay, bx, by, o.x1, o.y1, o.x2, o.y2) <= lim * lim;

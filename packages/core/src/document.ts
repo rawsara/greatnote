@@ -19,6 +19,9 @@ export interface ChangeEvent {
   fresh: Set<string>;
 }
 
+/** 유니온 각 멤버에 Omit 적용 */
+export type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
 export interface DocSnapshot {
   id: string;
   ops: Op[];
@@ -341,22 +344,35 @@ export class InkDocument {
     return d;
   }
 
+  /**
+   * 새 문서. objects[i] 는 i 번째 페이지의 초기 객체들 (가져오기용, z 순서대로).
+   * 초기 객체의 z 를 문서 시계보다 앞에 두어, 이후 새로 그린 획이 항상 위에 오도록 한다.
+   */
   static create(
     clientId: string,
     title: string,
     pages: Array<Pick<Page, 'width' | 'height' | 'bg'>>,
     assets: PdfAsset[] = [],
+    objects: Array<Array<DistributiveOmit<InkObject, 'id' | 'pageId' | 'z'>>> = [],
   ): InkDocument {
     const d = new InkDocument(newId(), clientId);
     const keys = keysBetween(null, null, pages.length);
+    const pageIds = pages.map(() => newId());
+    let z = 1;
+    const objOps: Op[] = [];
+    objects.forEach((list, i) => {
+      for (const o of list) {
+        const id = newId();
+        z++;
+        objOps.push({ k: 'obj', id, s: { c: z, n: clientId }, v: { ...o, id, pageId: pageIds[i], z } });
+      }
+    });
     d.apply(
       [
         { k: 'meta', id: 'meta', s: { c: 1, n: clientId }, v: { title, createdAt: Date.now() } satisfies DocMeta },
-        ...pages.map((p, i): Op => {
-          const id = newId();
-          return { k: 'page', id, s: { c: 1, n: clientId }, v: { id, order: keys[i], ...p } };
-        }),
+        ...pages.map((p, i): Op => ({ k: 'page', id: pageIds[i], s: { c: 1, n: clientId }, v: { id: pageIds[i], order: keys[i], ...p } })),
         ...assets.map((a): Op => ({ k: 'asset', id: a.id, s: { c: 1, n: clientId }, v: a })),
+        ...objOps,
       ],
       'local',
     );

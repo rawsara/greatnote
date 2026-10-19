@@ -25,6 +25,8 @@ interface ObjBase {
   pageId: string;
   /** z-order (Lamport 시계 기반이라 기기 간에도 인과 순서가 보존됨) */
   z: number;
+  /** 묶음 id — 스티커처럼 여러 객체가 하나로 선택·이동됨 (선택 사항) */
+  group?: string;
 }
 
 export interface StrokeObj extends ObjBase {
@@ -64,7 +66,35 @@ export interface TapeObj extends ObjBase {
   revealed: boolean;
 }
 
-export type InkObject = StrokeObj | ShapeObj | TapeObj;
+/** 이미지: 원본은 에셋(SHA-256 blob), 객체에는 위치·크기만 */
+export interface ImageObj extends ObjBase {
+  type: 'image';
+  assetId: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  opacity: number;
+}
+
+/**
+ * 텍스트 상자. flow=true 는 "페이지 텍스트" — 용지 좌상단에서 시작해
+ * 용지 폭에 맞춰 워드 문서처럼 이어지는 큰 텍스트 영역 (굿노트의 문서 타이핑).
+ */
+export interface TextObj extends ObjBase {
+  type: 'text';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+  fontSize: number;
+  bold: boolean;
+  color: string;
+  flow?: boolean;
+}
+
+export type InkObject = StrokeObj | ShapeObj | TapeObj | ImageObj | TextObj;
 
 export type PaperKind = 'blank' | 'lined' | 'grid' | 'dotted';
 
@@ -86,12 +116,17 @@ export interface DocMeta {
   createdAt: number;
 }
 
-/** PDF 원본 파일. id 는 내용의 SHA-256 (content-addressed) */
+/** 원본 파일(PDF·이미지). id 는 내용의 SHA-256 (content-addressed) */
 export interface PdfAsset {
   id: string;
   name: string;
   pageCount: number;
   size: number;
+  /** 생략 시 'pdf' (이전 버전 호환) */
+  kind?: 'pdf' | 'image';
+  mime?: string;
 }
+
+export type Asset = PdfAsset;
 
 export const A4 = { width: 595.28, height: 841.89 } as const;

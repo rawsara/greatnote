@@ -1,6 +1,6 @@
 import type { EraserMode, InkDocument, InkTool, Page, ShapeKind, TextLine } from '@inknote/core';
 
-export type ToolId = InkTool | 'eraser' | 'lasso' | 'shape' | 'tape';
+export type ToolId = InkTool | 'eraser' | 'lasso' | 'shape' | 'tape' | 'text';
 
 export interface Selection {
   pageId: string;
@@ -16,6 +16,7 @@ export interface EditorUIState {
   shapeKind: ShapeKind;
   shapeStyle: { color: string; width: number };
   tapeStyle: { color: string; width: number };
+  textStyle: { color: string; size: number };
   ruler: boolean;
   /** 펜이 감지되면 손가락은 스크롤/줌 전용 (팜 리젝션) */
   penOnly: boolean;
@@ -86,4 +87,6 @@ export interface EditorHost {
   rulerMoved(): void;
   /** PDF 페이지의 글자 줄 (추출 전이면 null, 추출을 시작함) */
   textLines(page: Page): TextLine[] | null;
+  /** 텍스트 도구: (x,y) 의 텍스트를 편집하거나 새 텍스트 상자를 만든다 */
+  editTextAt(rect: PageRect, x: number, y: number): void;
 }

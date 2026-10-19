@@ -147,7 +147,7 @@ export async function startServer(opts: ServerOptions) {
         if (req.method === 'GET' || req.method === 'HEAD') {
           if (!existsSync(file)) return void res.writeHead(404).end();
           const st = await stat(file);
-          res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': st.size, 'Cache-Control': 'public, max-age=31536000, immutable' });
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': st.size, 'Cache-Control': 'public, max-age=31536000, immutable' });
           if (req.method === 'HEAD') return void res.end();
           return void createReadStream(file).pipe(res);
         }

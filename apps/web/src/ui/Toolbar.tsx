@@ -15,6 +15,7 @@ const TOOLS: Array<{ id: ToolId; label: string; icon: () => JSX.Element; key: st
   { id: 'lasso', label: '올가미', icon: Icon.lasso, key: 'L' },
   { id: 'shape', label: '도형', icon: Icon.shape, key: 'S' },
   { id: 'tape', label: '암기 테이프', icon: Icon.tape, key: 'T' },
+  { id: 'text', label: '텍스트', icon: Icon.text, key: 'X' },
 ];
 
 const INK = new Set<ToolId>(['pen', 'pencil', 'ballpoint', 'marker', 'highlighter', 'underline']);
@@ -139,6 +140,20 @@ export function ToolOptions({ editor, st }: { editor: Editor; st: EditorUIState 
         <button className="text-btn" onClick={() => editor.setAllTapes(true)}><Icon.eye /> 모두 보기</button>
         <button className="text-btn" onClick={() => editor.setAllTapes(false)}><Icon.eyeOff /> 모두 가리기</button>
         <span className="hint">단어 위로 드래그해서 붙이고, 탭하면 가림/보임</span>
+      </div>
+    );
+  }
+  if (t === 'text') {
+    const ts = st.textStyle;
+    return (
+      <div className="options">
+        <Swatches value={ts.color} onPick={(color) => editor.update({ textStyle: { ...ts, color } })} />
+        <Seg<string>
+          items={[['12', '작게'], ['16', '보통'], ['24', '크게'], ['34', '제목']]}
+          value={String(ts.size)}
+          onPick={(v) => editor.update({ textStyle: { ...ts, size: +v } })}
+        />
+        <span className="hint">빈 곳을 탭하면 새 텍스트 상자, 글자를 탭하면 수정</span>
       </div>
     );
   }

@@ -1,4 +1,4 @@
-import { InkDocument, newId, type DocSnapshot, type Op, type Page, type PdfAsset } from '@inknote/core';
+import { InkDocument, newId, type DistributiveOmit, type DocSnapshot, type InkObject, type Op, type Page, type PdfAsset } from '@inknote/core';
 
 /**
  * 로컬 저장소 (IndexedDB) — 웹 브라우저와 Capacitor WebView(iOS/Android) 모두에서 동작.
@@ -79,8 +79,13 @@ export class Repo {
   }
 
   /** 새 문서: 생성 op 전체를 outbox 에 넣어 첫 동기화 때 서버로 업로드 */
-  async create(title: string, pages: Array<Pick<Page, 'width' | 'height' | 'bg'>>, assets: PdfAsset[] = []): Promise<InkDocument> {
-    const doc = InkDocument.create(this.clientId, title, pages, assets);
+  async create(
+    title: string,
+    pages: Array<Pick<Page, 'width' | 'height' | 'bg'>>,
+    assets: PdfAsset[] = [],
+    objects: Array<Array<DistributiveOmit<InkObject, 'id' | 'pageId' | 'z'>>> = [],
+  ): Promise<InkDocument> {
+    const doc = InkDocument.create(this.clientId, title, pages, assets, objects);
     await this.save(doc, 0, doc.toSnapshot().ops);
     return doc;
   }

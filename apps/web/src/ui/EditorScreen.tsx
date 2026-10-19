@@ -2,10 +2,11 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { InkDocument } from '@inknote/core';
 import { Editor } from '../engine/Editor';
 import { exportPdf } from '../engine/exportPdf';
+import { ImageManager } from '../engine/images';
 import { PdfManager } from '../engine/pdf';
 import { getServerUrl, type Repo } from '../storage/repo';
 import { DocSession, type SyncStatus } from '../sync/DocSession';
-import { importPdf, pickFile, saveFile } from './files';
+import { importImage, importPdf, pickFile, saveFile } from './files';
 import { Icon } from './icons';
 import { PageSidebar } from './PageSidebar';
 import { SelectionMenu, ToolButtons, ToolOptions } from './Toolbar';
@@ -39,11 +40,20 @@ export function EditorScreen({ repo, docId, onClose }: { repo: Repo; docId: stri
       const doc = rec ? InkDocument.fromSnapshot(rec.snapshot, repo.clientId) : new InkDocument(docId, repo.clientId);
       if (disposed || !hostRef.current) return;
       const pdf = new PdfManager((id) => repo.getBlob(id));
-      const editor = new Editor(hostRef.current, doc, pdf);
-      const session = new DocSession(doc, repo, getServerUrl(), rec?.lastSeq ?? 0, rec?.outbox ?? [], (id) => pdf.retry(id));
+      const images = new ImageManager(async (id) => {
+        const bytes = await repo.getBlob(id);
+        const asset = doc.assets().find((a) => a.id === id);
+        return bytes ? { bytes, mime: asset?.mime ?? 'image/jpeg' } : null;
+      });
+      const editor = new Editor(hostRef.current, doc, pdf, images);
+      const session = new DocSession(doc, repo, getServerUrl(), rec?.lastSeq ?? 0, rec?.outbox ?? [], (id) => {
+        pdf.retry(id);
+        images.retry(id);
+      });
       cleanup = () => {
         editor.destroy();
         pdf.destroy();
+        images.destroy();
         void session.close();
       };
       // 개발/테스트용 디버그 핸들
@@ -115,6 +125,21 @@ function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo;
     requestAnimationFrame(() => editor.scrollToPage(p.id));
   };
 
+  const insertImage = async () => {
+    const file = await pickFile('image/*');
+    if (!file) return;
+    setBusy('이미지 넣는 중…');
+    try {
+      const { asset, width, height } = await importImage(file, repo);
+      if (!doc.assets().some((a) => a.id === asset.id)) doc.addAsset(asset);
+      editor.insertImage(asset.id, width, height);
+    } catch (e) {
+      alert(`이미지를 열 수 없습니다: ${e}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const insertPdf = async (dropped?: File) => {
     const file = dropped ?? (await pickFile('application/pdf'));
     if (!file) return;
@@ -138,7 +163,7 @@ function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo;
   const doExport = async () => {
     setBusy('PDF 내보내는 중…');
     try {
-      const bytes = await exportPdf(doc, (id) => repo.getBlob(id));
+      const bytes = await exportPdf(doc, { getBlob: (id) => repo.getBlob(id), mimeOf: (id) => doc.assets().find((a) => a.id === id)?.mime });
       await saveFile(bytes, `${doc.meta.title || 'InkNote'}.pdf`);
     } catch (e) {
       alert(`내보내기 실패: ${e}`);
@@ -169,6 +194,7 @@ function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo;
           <button className="icon-btn" title="다시 실행 (⇧⌘Z · 세 손가락 탭)" disabled={!st.canRedo} onClick={() => editor.redo()}><Icon.redo /></button>
           <span className="divider" />
           <button className="icon-btn" title="페이지 추가" onClick={addPage}><Icon.plus /></button>
+          <button className="icon-btn" title="이미지 삽입" onClick={insertImage}><Icon.image /></button>
           <button className="icon-btn" title="PDF 삽입 (파일을 끌어다 놓아도 됩니다)" onClick={() => insertPdf()}><Icon.file /></button>
           <button className="icon-btn" title="PDF로 내보내기" onClick={doExport}><Icon.share /></button>
           <ThemeButton />

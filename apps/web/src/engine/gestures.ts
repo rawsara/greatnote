@@ -1,6 +1,6 @@
 import {
   PointFilter, TOOL_PRESETS, WidthEstimator, affineScaleAbout, affineTranslate, applyEndTaper, bboxOfFlat,
-  bboxOfSegment, eraseStep, lassoSelect, newId, pointHitsTape, quantizePoints, selectionBBox,
+  bboxOfSegment, eraseStep, expandGroups, lassoSelect, newId, pointHitsTape, quantizePoints, selectionBBox,
   simplifyStroke, snapUnderline, straightenStroke, taperLength, transformObject, IDENTITY,
   type Affine, type BBox, type InkObject, type InkTool, type ShapeObj, type StrokeObj, type TapeObj, type ToolPreset,
 } from '@inknote/core';
@@ -330,7 +330,7 @@ export class LassoGesture implements Gesture {
   up(): void {
     const ids =
       this.pts.length >= 6
-        ? lassoSelect(this.ed.doc.query(this.rect.page.id, bboxOfFlat(this.pts, 2)), this.pts)
+        ? expandGroups(this.ed.doc.objects(this.rect.page.id), lassoSelect(this.ed.doc.query(this.rect.page.id, bboxOfFlat(this.pts, 2)), this.pts))
         : [];
     this.ed.setSelection(ids.length ? { pageId: this.rect.page.id, ids } : null);
   }
@@ -603,6 +603,29 @@ export class TapeGesture implements Gesture {
     this.ed.pageTransform(ctx, this.rect);
     drawObject(ctx, this.obj(), { cache: false, tapeAlpha: 0.85 });
   }
+}
+
+// ─────────────────────────── 텍스트 ───────────────────────────
+
+export class TextGesture implements Gesture {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  private x: number;
+  private y: number;
+
+  constructor(private ed: EditorHost, e: PointerEvent, private rect: PageRect) {
+    this.pointerId = e.pointerId;
+    this.pointerType = e.pointerType;
+    [this.x, this.y] = ed.toPage(rect, ...ed.local(e));
+  }
+
+  move(): void {}
+
+  up(): void {
+    this.ed.editTextAt(this.rect, this.x, this.y);
+  }
+
+  cancel(): void {}
 }
 
 // ─────────────────────────── 자 ───────────────────────────

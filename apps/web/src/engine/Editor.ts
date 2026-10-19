@@ -1,13 +1,14 @@
 import {
   A4, TOOL_PRESETS, bboxIntersects, isHighlighter, newId, objectBBox, selectionBBox, transformObject, affineTranslate,
-  type ChangeEvent, type InkDocument, type InkObject, type InkTool, type Page, type TextLine,
+  type ChangeEvent, type ImageObj, type InkDocument, type InkObject, type InkTool, type Page, type TextLine, type TextObj,
 } from '@inknote/core';
 import {
-  EraserGesture, InkGesture, LassoGesture, RulerGesture, ShapeGesture, TapeGesture, TransformGesture,
+  EraserGesture, InkGesture, LassoGesture, RulerGesture, ShapeGesture, TapeGesture, TextGesture, TransformGesture,
   PT_PER_CM, coalescedOf, drawEraserCursor, drawSelectionBox, selectionHit, tapeAt,
 } from './gestures';
+import type { ImageManager } from './images';
 import type { PdfManager } from './pdf';
-import { drawInkLayer, drawObject, drawObjects, drawPaper, drawUnderLayer, pageObjects } from './render';
+import { TEXT_FONT, TEXT_LINE, drawInkLayer, drawObject, drawObjects, drawPaper, drawUnderLayer, layoutText, pageObjects } from './render';
 import type { EditorHost, EditorUIState, Gesture, PageRect, RulerState, Selection, SnapLine, ToolId } from './types';
 
 const GAP = 28;
@@ -23,12 +24,13 @@ function defaultState(): EditorUIState {
   const base: EditorUIState = {
     tool: 'pen', inkStyles, eraserMode: 'stroke', eraserSize: 24, shapeKind: 'rect',
     shapeStyle: { color: '#1b1f3b', width: 1.8 }, tapeStyle: { color: '#f59e0b', width: 16 },
+    textStyle: { color: '#1b1f3b', size: 16 },
     ruler: false, penOnly: false, zoom: 1, currentPageId: null, selection: null,
     canUndo: false, canRedo: false, docVersion: 0, clipboardCount: 0,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? 'null');
-    if (saved) return { ...base, ...saved, inkStyles: { ...inkStyles, ...saved.inkStyles }, selection: null, ruler: false, clipboardCount: 0 };
+    if (saved) return { ...base, ...saved, inkStyles: { ...inkStyles, ...saved.inkStyles }, textStyle: saved.textStyle ?? base.textStyle, selection: null, ruler: false, clipboardCount: 0 };
   } catch {
     /* 저장소 접근 불가 시 기본값 */
   }
@@ -102,6 +104,7 @@ export class Editor implements EditorHost {
     container: HTMLElement,
     readonly doc: InkDocument,
     readonly pdf: PdfManager,
+    readonly images?: ImageManager,
   ) {
     this.root = document.createElement('div');
     this.root.className = 'editor-root';
@@ -147,6 +150,7 @@ export class Editor implements EditorHost {
       this.bgDirty = true;
       this.schedule();
     }));
+    if (images) this.cleanup.push(images.onUpdate(() => this.invalidate(true)));
     // 다크 모드 전환 시 책상 색 다시 그리기
     const mo = new MutationObserver(() => this.invalidate(true));
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
@@ -165,6 +169,7 @@ export class Editor implements EditorHost {
   }
 
   destroy(): void {
+    this.commitTextEdit();
     cancelAnimationFrame(this.raf);
     this.cleanup.forEach((f) => f());
     this.root.remove();
@@ -189,6 +194,7 @@ export class Editor implements EditorHost {
 
   update(patch: Partial<EditorUIState>): void {
     if (patch.tool && patch.tool !== 'lasso' && this.state.selection) patch.selection = null;
+    if (patch.tool && patch.tool !== this.state.tool) this.commitTextEdit();
     if (patch.ruler && !this.state.ruler) this.centerRuler();
     // 밑줄 도구 선택 시 보이는 PDF 페이지의 글자 줄을 미리 추출
     if (patch.tool === 'underline') {
@@ -197,8 +203,8 @@ export class Editor implements EditorHost {
     }
     this.syncState(patch);
     try {
-      const { inkStyles, eraserMode, eraserSize, shapeKind, shapeStyle, tapeStyle, tool, penOnly } = this.state;
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ inkStyles, eraserMode, eraserSize, shapeKind, shapeStyle, tapeStyle, tool, penOnly }));
+      const { inkStyles, eraserMode, eraserSize, shapeKind, shapeStyle, tapeStyle, textStyle, tool, penOnly } = this.state;
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ inkStyles, eraserMode, eraserSize, shapeKind, shapeStyle, tapeStyle, textStyle, tool, penOnly }));
     } catch {
       /* ignore */
     }
@@ -328,6 +334,7 @@ export class Editor implements EditorHost {
     let cur = this.rects[0]?.page.id ?? null;
     for (const r of this.rects) if (r.y - GAP <= cy) cur = r.page.id;
     this.syncState({ zoom: Math.round(this.zoom * 100) / 100, currentPageId: cur });
+    this.positionTextEditor();
     this.invalidate(true);
   }
 
@@ -660,7 +667,8 @@ export class Editor implements EditorHost {
 
   recolorSelection(color: string): void {
     const objs = this.selectedObjects();
-    if (objs.length) this.doc.updateObjects(objs.map((o) => ({ ...o, color })), '색상 변경');
+    const colorable = objs.filter((o) => o.type !== 'image');
+    if (colorable.length) this.doc.updateObjects(colorable.map((o) => ({ ...o, color }) as InkObject), '색상 변경');
   }
 
   copySelection(): void {
@@ -680,10 +688,107 @@ export class Editor implements EditorHost {
     const pageId = sel?.pageId ?? this.state.currentPageId;
     if (!pageId) return;
     const m = affineTranslate(offset, offset);
-    const copies = this.clipboard.map((o) => ({ ...transformObject(o, m), id: newId(), pageId, z: this.doc.nextZ() }));
+    // 스티커 등 묶음은 새 묶음 id 로 (원본 묶음과 섞이지 않게)
+    const groups = new Map<string, string>();
+    const regroup = (g?: string) => (g ? (groups.get(g) ?? (groups.set(g, newId()), groups.get(g)!)) : undefined);
+    const copies = this.clipboard.map((o) => {
+      const c = { ...transformObject(o, m), id: newId(), pageId, z: this.doc.nextZ() };
+      const g = regroup(o.group);
+      if (g) c.group = g;
+      return c;
+    });
     this.doc.addObjects(copies, '붙여넣기');
     this.clipboard = copies;
     this.setSelection({ pageId, ids: copies.map((c) => c.id) });
+  }
+
+  // ───────────────────────── 텍스트 편집 ─────────────────────────
+
+  private textEdit: { obj: TextObj; isNew: boolean; el: HTMLTextAreaElement } | null = null;
+
+  editTextAt(rect: PageRect, x: number, y: number): void {
+    const near = this.doc
+      .query(rect.page.id, { minX: x - 2, minY: y - 2, maxX: x + 2, maxY: y + 2 })
+      .filter((o): o is TextObj => o.type === 'text')
+      // 페이지 텍스트는 용지 전체를 덮으므로, 쓰여 있는 줄(+이어 쓸 한 줄) 위를 탭했을 때만 편집
+      .filter((o) => !o.flow || y <= o.y + (layoutText(o).length + 1) * o.fontSize * TEXT_LINE)
+      .sort((a, b) => Number(!!a.flow) - Number(!!b.flow) || b.z - a.z); // 일반 상자 우선, 그다음 페이지 텍스트
+    if (near[0]) return this.startTextEdit(near[0], false);
+    const st = this.state.textStyle;
+    const w = Math.max(80, Math.min(280, rect.page.width - x - 16));
+    this.startTextEdit(
+      { type: 'text', id: newId(), pageId: rect.page.id, z: 0, x, y: y - (st.size * TEXT_LINE) / 2, w, h: st.size * TEXT_LINE, text: '', fontSize: st.size, bold: false, color: st.color },
+      true,
+    );
+  }
+
+  private startTextEdit(obj: TextObj, isNew: boolean): void {
+    this.commitTextEdit();
+    const el = document.createElement('textarea');
+    el.className = 'text-editor';
+    el.value = obj.text;
+    el.spellcheck = false;
+    el.addEventListener('input', () => this.positionTextEditor());
+    el.addEventListener('blur', () => this.commitTextEdit());
+    el.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') this.commitTextEdit();
+    });
+    this.root.append(el);
+    this.textEdit = { obj, isNew, el };
+    if (!isNew) this.setHidden([obj.id]);
+    this.positionTextEditor();
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }
+
+  private positionTextEditor(): void {
+    const t = this.textEdit;
+    if (!t) return;
+    const rect = this.rectOf(t.obj.pageId);
+    if (!rect) return;
+    const [sx, sy] = this.pageToScreen(rect, t.obj.x, t.obj.y);
+    const z = this.zoom;
+    Object.assign(t.el.style, {
+      left: `${sx}px`,
+      top: `${sy}px`,
+      width: `${t.obj.w * z}px`,
+      font: `${t.obj.bold ? '700 ' : ''}${t.obj.fontSize * z}px/${TEXT_LINE} ${TEXT_FONT}`,
+      color: t.obj.color,
+    });
+    t.el.style.height = '0px';
+    t.el.style.height = `${Math.max(t.obj.h * z, t.el.scrollHeight)}px`;
+  }
+
+  commitTextEdit(): void {
+    const t = this.textEdit;
+    if (!t) return;
+    this.textEdit = null;
+    const text = t.el.value.replace(/\s+$/, '');
+    t.el.remove();
+    this.setHidden([]);
+    const next: TextObj = { ...t.obj, text };
+    if (!next.flow) next.h = Math.max(next.fontSize * TEXT_LINE, layoutText(next).length * next.fontSize * TEXT_LINE);
+    if (t.isNew) {
+      if (text.trim()) this.doc.addObjects([{ ...next, z: this.doc.nextZ() }], '텍스트');
+    } else if (!text.trim() && !t.obj.flow) this.doc.removeObjects([t.obj.id], '텍스트 삭제');
+    else if (text !== t.obj.text) this.doc.updateObjects([next], '텍스트 수정');
+  }
+
+  /** 이미지 삽입: 현재 페이지 가운데에, 페이지 폭의 60% 안으로 맞춰서 */
+  insertImage(assetId: string, naturalW: number, naturalH: number): void {
+    const pageId = this.state.currentPageId;
+    const rect = pageId ? this.rectOf(pageId) : this.rects[0];
+    if (!rect) return;
+    const { page } = rect;
+    const k = Math.min(1, (page.width * 0.6) / naturalW, (page.height * 0.6) / naturalH);
+    const w = naturalW * k, h = naturalH * k;
+    const view = this.viewRect();
+    const cy = Math.max(h / 2, Math.min(page.height - h / 2, (view.minY + view.maxY) / 2 - rect.y));
+    const img: ImageObj = { type: 'image', id: newId(), pageId: page.id, z: this.doc.nextZ(), assetId, x: (page.width - w) / 2, y: cy - h / 2, w, h, opacity: 1 };
+    this.doc.addObjects([img], '이미지');
+    this.update({ tool: 'lasso' });
+    this.setSelection({ pageId: page.id, ids: [img.id] });
   }
 
   setAllTapes(revealed: boolean): void {
@@ -756,6 +861,8 @@ export class Editor implements EditorHost {
         return new ShapeGesture(this, e, rect);
       case 'tape':
         return new TapeGesture(this, e, rect);
+      case 'text':
+        return new TextGesture(this, e, rect);
       default:
         return new InkGesture(this, e, rect, tool);
     }
@@ -763,6 +870,11 @@ export class Editor implements EditorHost {
 
   private onDown = (e: PointerEvent): void => {
     const [x, y] = this.local(e);
+    // 텍스트 편집 중 캔버스를 누르면 편집을 끝낸다 (그 탭은 소비)
+    if (this.textEdit && e.pointerType !== 'touch') {
+      this.commitTextEdit();
+      return;
+    }
     if (e.pointerType === 'pen' && !this.state.penOnly) this.update({ penOnly: true });
 
     if (e.pointerType === 'touch') {
@@ -931,7 +1043,7 @@ export class Editor implements EditorHost {
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.state.selection) this.deleteSelection();
     else if (e.key === 'Escape') this.setSelection(null);
     else if (!mod) {
-      const map: Record<string, ToolId> = { p: 'pen', b: 'ballpoint', n: 'pencil', m: 'marker', h: 'highlighter', u: 'underline', e: 'eraser', l: 'lasso', s: 'shape', t: 'tape' };
+      const map: Record<string, ToolId> = { p: 'pen', b: 'ballpoint', n: 'pencil', m: 'marker', h: 'highlighter', u: 'underline', e: 'eraser', l: 'lasso', s: 'shape', t: 'tape', x: 'text' };
       const tool = map[e.key.toLowerCase()];
       if (tool) this.update({ tool });
     }

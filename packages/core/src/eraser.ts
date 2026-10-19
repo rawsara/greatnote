@@ -32,6 +32,7 @@ export function eraseStep(
     if (!bboxIntersects(objectBBox(o), sweep)) continue;
     if (mode === 'highlighter' && !isHighlighter(o)) continue;
     if (!hitObject(o, ax, ay, bx, by, r)) continue;
+    if (o.type === 'image' || o.type === 'text') continue;
     if (mode !== 'partial' || o.type === 'tape') {
       res.remove.push(o.id);
       continue;

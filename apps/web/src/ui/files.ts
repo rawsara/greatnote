@@ -13,6 +13,17 @@ export async function importPdf(file: File, repo: Repo): Promise<{ asset: PdfAss
   return { asset: { id, name: file.name, pageCount: info.pageCount, size: bytes.byteLength }, info };
 }
 
+/** 이미지 파일 → 에셋 (원본 그대로 보관) + 원래 크기 */
+export async function importImage(file: File, repo: Repo): Promise<{ asset: PdfAsset; width: number; height: number }> {
+  const bytes = await file.arrayBuffer();
+  const bmp = await createImageBitmap(new Blob([bytes], { type: file.type }));
+  const { width, height } = bmp;
+  bmp.close();
+  const id = await sha256Hex(bytes);
+  await repo.putBlob(id, bytes);
+  return { asset: { id, name: file.name, pageCount: 0, size: bytes.byteLength, kind: 'image', mime: file.type || 'image/jpeg' }, width, height };
+}
+
 export function pickFile(accept: string): Promise<File | null> {
   return new Promise((resolve) => {
     const input = document.createElement('input');

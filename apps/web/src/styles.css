@@ -196,3 +196,15 @@ input, select { font: inherit; }
   border: 3px dashed var(--accent); border-radius: 18px; background: color-mix(in srgb, var(--bg) 80%, transparent);
   font-size: 20px; font-weight: 700; color: var(--accent); pointer-events: none;
 }
+
+/* 텍스트 편집기 (캔버스 위에 겹쳐 띄움) */
+.text-editor {
+  position: absolute; z-index: 6; margin: 0; padding: 0; border: 1px dashed var(--accent); border-radius: 2px;
+  background: rgba(255, 255, 255, 0.55); outline: none; resize: none; overflow: hidden; white-space: pre-wrap;
+  -webkit-user-select: text; user-select: text;
+}
+.import-report { align-items: center; justify-content: space-between; }
+.import-report .warn { font-size: 12px; color: var(--danger); margin-top: 4px; }
+@media (max-width: 1100px) {
+  .tool-group .icon-btn { width: 34px; }
+}

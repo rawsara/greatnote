@@ -28,7 +28,7 @@ npm run dev            # 웹 앱        http://localhost:5173  (--host 로 LAN �
 npm test               # core 단위 테스트 + 서버 동기화 테스트
 npm run typecheck
 # E2E: 서버(8787)와 `npm run build && npx vite preview --port 4173` 실행 후
-CHROMIUM_PATH=/path/to/chrome node e2e/e2e.mjs
+CHROMIUM_PATH=/path/to/chrome node e2e/e2e.mjs   # 합성 .goodnotes 파일을 만들어 가져오기까지 검사
 ```
 
 ## iOS / Android
@@ -44,6 +44,14 @@ npm run cap:android    # 빌드 → 동기화 → Android Studio 열기
 앱에서는 라이브러리 ⚙️ 에 동기화 서버 주소(예: `ws://192.168.0.10:8787`, 운영은 `wss://`)를 입력한다.
 iOS 에서 http/ws 개발 서버에 붙으려면 Info.plist 의 ATS 예외(NSAllowsLocalNetworking)가 필요하다.
 
+## 굿노트에서 옮겨오기
+
+굿노트에서 노트를 **GoodNotes 형식(.goodnotes)** 으로 내보낸 뒤, 라이브러리의 “굿노트 가져오기” 버튼을 누르거나
+파일을 화면에 끌어다 놓으면 새 노트로 만들어진다. 필기는 이미지가 아닌 벡터 획으로 들어와서 지우개·올가미로 그대로 이어서 편집할 수 있다.
+
+가져오는 것: 펜 필기(굵기 변화 포함), 형광펜, 도형, 스티커(묶음으로 선택), 이미지, 텍스트 상자, 페이지 텍스트, 속지 템플릿, 용지 크기.
+가져오지 않는 것: 지운 획, 손글씨 인식(검색) 데이터. 굿노트 비공개 형식이라 굿노트 업데이트로 형식이 바뀌면 일부가 빠질 수 있으며, 이때는 결과 화면에 경고가 표시된다.
+
 ## 단축키 (웹)
 
 | 키 | 동작 | 키 | 동작 |
@@ -53,6 +61,7 @@ iOS 에서 http/ws 개발 서버에 붙으려면 Info.plist 의 ATS 예외(NSAll
 | B | 볼펜(필압 없음) | S | 도형 |
 | M | 마카 | T | 암기 테이프 |
 | H | 형광펜 | U | 밑줄 |
+| X | 텍스트 | | |
 | ⌘Z / ⇧⌘Z | 실행 취소 / 다시 실행 | ⌘C ⌘V ⌘D | 복사 / 붙여넣기 / 복제 |
 | Space+드래그, 휠 | 이동 | ⌘+휠 | 확대/축소 |
 
