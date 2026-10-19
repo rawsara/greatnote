@@ -462,7 +462,8 @@ assert(await A.evaluate(() => { const d = window.__inknote.doc; return d.objects
 
 // 이미지 삽입 (브라우저에서 만든 PNG)
 const png = Buffer.from(await A.evaluate(() => { const c = document.createElement('canvas'); c.width = 80; c.height = 40; const g = c.getContext('2d'); g.fillStyle = '#4a90e2'; g.fillRect(0, 0, 80, 40); return c.toDataURL('image/png').split(',')[1]; }), 'base64');
-const [imgChooser] = await Promise.all([A.waitForEvent('filechooser'), A.getByTitle('이미지 삽입').click()]);
+await A.getByTitle('사진·이미지 넣기').click();
+const [imgChooser] = await Promise.all([A.waitForEvent('filechooser'), A.getByRole('menuitem', { name: '파일에서' }).click()]);
 await imgChooser.setFiles({ name: 'blue.png', mimeType: 'image/png', buffer: png });
 await A.waitForFunction(() => { const d = window.__inknote.doc; return d.objects(d.pages[0].id).filter((o) => o.type === 'image').length === 2; });
 assert(true, 'insert image');
@@ -471,6 +472,96 @@ await A.screenshot({ path: path.join(OUT, '13-goodnotes-import.png') });
 const [gnDl] = await Promise.all([A.waitForEvent('download'), A.getByTitle('PDF로 내보내기').click()]);
 const gnPdf = await PDFDocument.load(fs.readFileSync(await gnDl.path()));
 assert(gnPdf.getPageCount() === 1 && Math.abs(gnPdf.getPage(0).getSize().width - 841.5) < 1, 'export imported note to PDF at paper size');
+
+// ───────────── 9. 검색 · 스티커 · 사진 스티커 · 라이브러리 검색 · 손글씨 인식 ─────────────
+// 굿노트 인식 데이터("기말 고시" + 2순위 "고사")와 텍스트 상자를 노트 안에서 찾기
+await A.getByTitle(/^찾기/).click();
+const search = A.getByRole('searchbox').or(A.getByLabel('노트에서 찾기'));
+await search.fill('고사');
+await A.waitForFunction(() => document.querySelector('.search-count')?.textContent === '1/1');
+assert((await A.locator('.search-results .search-kind').first().innerText()) === '손글씨', 'search finds GoodNotes handwriting via alternate candidate');
+await search.fill('E2E');
+await A.waitForFunction(() => document.querySelector('.search-count')?.textContent === '1/1' && document.querySelector('.search-results .search-kind')?.textContent === '텍스트');
+assert(true, 'search finds text boxes');
+await search.fill('기말');
+await A.waitForFunction(() => document.querySelector('.search-count')?.textContent === '1/1' && document.querySelector('.search-results .search-kind')?.textContent === '손글씨');
+await A.waitForTimeout(300);
+await A.screenshot({ path: path.join(OUT, '14-search.png') });
+await search.press('Escape');
+
+// 기본 스티커 붙이기 → 묶음으로 선택됨
+await A.getByTitle('스티커', { exact: true }).click();
+await A.getByRole('button', { name: '웃음 붙이기' }).click();
+const smile = await A.evaluate(() => {
+  const d = window.__inknote.doc, ed = window.__inknote.editor;
+  const ids = ed.state.selection?.ids ?? [];
+  const objs = ids.map((id) => d.object(id));
+  return { n: objs.length, groups: new Set(objs.map((o) => o.group)).size, filled: objs.filter((o) => o.type === 'shape' && o.fill).length };
+});
+assert(smile.n === 4 && smile.groups === 1 && smile.filled === 3, `built-in sticker inserted as one group (${JSON.stringify(smile)})`);
+await A.getByRole('button', { name: '별 붙이기' }).click();
+// 선택한 것(별)을 내 스티커로 저장 → 보관함에서 다시 붙이기
+await A.getByRole('button', { name: /내 스티커/ }).click();
+// 보관함은 서버와 동기화되므로(이전 실행분 포함) 개수 변화로 확인
+await A.waitForTimeout(500);
+const mineBefore = await A.evaluate(() => window.__inknote.stickers.list().length);
+await A.getByRole('button', { name: '선택한 것으로 만들기' }).click();
+await A.waitForFunction((n) => window.__inknote.stickers.list().length === n + 1, mineBefore);
+await A.getByRole('button', { name: '내 스티커 붙이기' }).first().click();
+const stars = await A.evaluate(() => { const d = window.__inknote.doc; return d.objects(d.pages[0].id).filter((o) => o.type === 'shape' && o.shape === 'polygon' && o.fill === '#fbbf24').length; });
+assert(stars === 2, 'save selection as my sticker and place it again');
+// 사진으로 스티커 만들기 (웹: 파일 선택)
+const [stChooser] = await Promise.all([A.waitForEvent('filechooser'), A.getByRole('button', { name: '사진으로' }).click()]);
+await stChooser.setFiles({ name: 'sticker.png', mimeType: 'image/png', buffer: png });
+await A.waitForFunction((n) => window.__inknote.stickers.list().length === n + 2, mineBefore);
+await A.getByRole('button', { name: '내 스티커 붙이기' }).first().click();
+assert(await A.evaluate(() => { const d = window.__inknote.doc; return d.objects(d.pages[0].id).filter((o) => o.type === 'image').length === 3; }), 'image sticker from photo');
+await A.waitForTimeout(500);
+await A.screenshot({ path: path.join(OUT, '15-stickers.png') });
+await A.getByRole('dialog', { name: '스티커' }).getByTitle('닫기').click();
+const [stDl] = await Promise.all([A.waitForEvent('download'), A.getByTitle('PDF로 내보내기').click()]);
+assert((await PDFDocument.load(fs.readFileSync(await stDl.path()))).getPageCount() === 1, 'export with filled vector stickers');
+
+// 라이브러리 전체 검색 → 해당 노트를 검색어와 함께 열기
+await A.getByTitle('라이브러리').click();
+await A.getByLabel('모든 노트에서 찾기').fill('기말');
+await A.locator('.card-hit').first().waitFor();
+assert((await A.locator('.card').count()) === 1 && (await A.locator('.card-hit').innerText()).includes('1쪽'), 'library search finds handwriting across notes');
+assert((await A.evaluate(() => [...document.querySelectorAll('.card-title')].map((e) => e.textContent))).every((t) => t !== '내 스티커'), 'sticker library hidden from note list');
+await A.screenshot({ path: path.join(OUT, '16-library-search.png') });
+await A.locator('.card-cover').first().click();
+await A.waitForFunction(() => document.querySelector('.search-count')?.textContent === '1/1');
+assert(await A.getByLabel('노트에서 찾기').inputValue() === '기말', 'opening from library search keeps the query');
+
+// 손글씨 인식 파이프라인 (브라우저에는 인식기가 없으므로 가짜 인식기 주입)
+await A.getByTitle('라이브러리').click();
+await A.evaluate(() => {
+  window.__inknoteTestRecognizer = {
+    engine: 'vision',
+    recognize: async (_page, strokes) => {
+      const xs = strokes.flatMap((s) => s.pts.filter((_, i) => i % 3 === 0)), ys = strokes.flatMap((s) => s.pts.filter((_, i) => i % 3 === 1));
+      const x = Math.min(...xs), y = Math.min(...ys);
+      return [{ t: '사과나무', x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y }];
+    },
+  };
+});
+await A.getByRole('button', { name: '새 노트', exact: true }).click();
+await A.getByRole('button', { name: '무지' }).click();
+await A.waitForFunction(() => window.__inknote?.editor?.rects.length === 1 && window.__inknote.doc.meta.title === '새 노트');
+await A.keyboard.press('p');
+await stroke(cdpA, A, cursive(100, 200, 160, 4));
+await A.waitForFunction(() => { const d = window.__inknote.doc; return d.hwr(d.pages[0].id)?.words[0]?.t === '사과나무'; }, null, { timeout: 15000 });
+assert(await A.evaluate(() => !window.__inknote.doc.canRedo() && window.__inknote.doc.canUndo()), 'recognition result stored without touching undo history');
+await A.getByTitle(/^찾기/).click();
+await A.getByLabel('노트에서 찾기').fill('나무');
+await A.waitForFunction(() => document.querySelector('.search-count')?.textContent === '1/1');
+assert((await A.locator('.search-foot').innerText()).includes('인식됨'), 'recognition status shown');
+await A.screenshot({ path: path.join(OUT, '17-recognized.png') });
+// 필기를 지우면 인식 결과도 비워짐
+await A.getByLabel('노트에서 찾기').press('Escape');
+await A.evaluate(() => window.__inknote.editor.undo());
+await A.waitForFunction(() => { const d = window.__inknote.doc; return d.hwr(d.pages[0].id)?.words.length === 0; }, null, { timeout: 15000 });
+assert(true, 'recognition cleared when handwriting is removed');
 
 await browser.close();
 assert(pageErrors.length === 0, `no uncaught page errors (${pageErrors.length})`);

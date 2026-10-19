@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { InkDocument } from '@inknote/core';
 import { Editor } from '../engine/Editor';
 import { exportPdf } from '../engine/exportPdf';
@@ -6,16 +7,22 @@ import { ImageManager } from '../engine/images';
 import { PdfManager } from '../engine/pdf';
 import { getServerUrl, type Repo } from '../storage/repo';
 import { DocSession, type SyncStatus } from '../sync/DocSession';
-import { importImage, importPdf, pickFile, saveFile } from './files';
+import { importImage, importPdf, pickFile, pickPhoto, saveFile } from './files';
 import { Icon } from './icons';
 import { PageSidebar } from './PageSidebar';
 import { SelectionMenu, ToolButtons, ToolOptions } from './Toolbar';
 import { ThemeButton } from './ThemeButton';
 import { usePdfDrop } from './usePdfDrop';
+import { SearchPanel } from './SearchPanel';
+import { HwrScheduler, createRecognizer, type RecognitionStatus } from '../recognize/scheduler';
+import { StickerLibrary } from '../stickers/library';
+import { StickerPanel } from './StickerPanel';
 
 interface Loaded {
   editor: Editor;
   session: DocSession;
+  hwr: HwrScheduler;
+  stickers: StickerLibrary;
 }
 
 const STATUS_LABEL: Record<SyncStatus, string> = {
@@ -26,7 +33,7 @@ const STATUS_LABEL: Record<SyncStatus, string> = {
   synced: '동기화됨',
 };
 
-export function EditorScreen({ repo, docId, onClose }: { repo: Repo; docId: string; onClose: () => void }) {
+export function EditorScreen({ repo, docId, query, onClose }: { repo: Repo; docId: string; query?: string; onClose: () => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -40,9 +47,11 @@ export function EditorScreen({ repo, docId, onClose }: { repo: Repo; docId: stri
       const doc = rec ? InkDocument.fromSnapshot(rec.snapshot, repo.clientId) : new InkDocument(docId, repo.clientId);
       if (disposed || !hostRef.current) return;
       const pdf = new PdfManager((id) => repo.getBlob(id));
+      // 스티커 보관함 (노트와 별도 문서로 동기화)
+      const stickers = await StickerLibrary.open(repo, (id) => images.retry(id));
       const images = new ImageManager(async (id) => {
         const bytes = await repo.getBlob(id);
-        const asset = doc.assets().find((a) => a.id === id);
+        const asset = doc.assets().find((a) => a.id === id) ?? stickers.doc.assets().find((a) => a.id === id);
         return bytes ? { bytes, mime: asset?.mime ?? 'image/jpeg' } : null;
       });
       const editor = new Editor(hostRef.current, doc, pdf, images);
@@ -50,15 +59,18 @@ export function EditorScreen({ repo, docId, onClose }: { repo: Repo; docId: stri
         pdf.retry(id);
         images.retry(id);
       });
+      const hwr = new HwrScheduler(doc, await createRecognizer());
       cleanup = () => {
+        hwr.close();
+        void stickers.close();
         editor.destroy();
         pdf.destroy();
         images.destroy();
         void session.close();
       };
       // 개발/테스트용 디버그 핸들
-      (window as unknown as { __inknote?: unknown }).__inknote = { editor, session, doc };
-      setLoaded({ editor, session });
+      (window as unknown as { __inknote?: unknown }).__inknote = { editor, session, doc, hwr, stickers };
+      setLoaded({ editor, session, hwr, stickers });
     })().catch((e) => setError(String(e)));
     return () => {
       disposed = true;
@@ -68,16 +80,21 @@ export function EditorScreen({ repo, docId, onClose }: { repo: Repo; docId: stri
 
   return (
     <div className="editor-screen">
-      {loaded ? <EditorChrome {...loaded} repo={repo} onClose={onClose} /> : <div className="topbar" />}
+      {loaded ? <EditorChrome {...loaded} repo={repo} query={query} onClose={onClose} /> : <div className="topbar" />}
       <div className="editor-body">
         {loaded && <SidebarSlot editor={loaded.editor} />}
         <div ref={hostRef} className="editor-host">
-          {loaded && <SelectionOverlay editor={loaded.editor} />}
+          {loaded && <SelectionOverlay editor={loaded.editor} stickers={loaded.stickers} />}
           {error && <div className="error">{error}</div>}
         </div>
       </div>
     </div>
   );
+}
+
+function portal(node: ReactNode) {
+  const host = document.querySelector('.editor-host');
+  return host ? createPortal(node, host) : node;
 }
 
 function useEditorState(editor: Editor) {
@@ -106,16 +123,43 @@ function SidebarSlot({ editor }: { editor: Editor }) {
   return open ? <PageSidebar editor={editor} st={st} /> : null;
 }
 
-function SelectionOverlay({ editor }: { editor: Editor }) {
+function SelectionOverlay({ editor, stickers }: { editor: Editor; stickers: StickerLibrary }) {
   const st = useEditorState(editor);
-  return <SelectionMenu editor={editor} st={st} />;
+  const [saved, setSaved] = useState(false);
+  const save = () => {
+    const objs = editor.selectedObjects();
+    const ids = new Set(objs.flatMap((o) => (o.type === 'image' ? [o.assetId] : [])));
+    stickers.add(objs, editor.doc.assets().filter((a) => ids.has(a.id)));
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1600);
+  };
+  return (
+    <>
+      <SelectionMenu editor={editor} st={st} onSaveSticker={save} />
+      {saved && <div className="toast">내 스티커에 저장했어요</div>}
+    </>
+  );
 }
 
-function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo; onClose: () => void }) {
+function EditorChrome({ editor, session, hwr, stickers, repo, query, onClose }: Loaded & { repo: Repo; query?: string; onClose: () => void }) {
   const st = useEditorState(editor);
   const [status, setStatus] = useState<SyncStatus>(session.status);
   const [busy, setBusy] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(!!query);
+  const [panel, setPanel] = useState<'stickers' | 'image' | null>(null);
+  const [recog, setRecog] = useState<RecognitionStatus>(hwr.status);
   useEffect(() => session.onStatus(setStatus), [session]);
+  useEffect(() => hwr.onStatus(setRecog), [hwr]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
   const doc = editor.doc;
 
   const addPage = () => {
@@ -125,8 +169,10 @@ function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo;
     requestAnimationFrame(() => editor.scrollToPage(p.id));
   };
 
-  const insertImage = async () => {
-    const file = await pickFile('image/*');
+  /** 이미지 넣기: 파일·사진 보관함 / 카메라 */
+  const insertImage = async (source: 'photos' | 'camera' | 'file') => {
+    setPanel(null);
+    const file = source === 'file' ? await pickFile('image/*') : await pickPhoto(source);
     if (!file) return;
     setBusy('이미지 넣는 중…');
     try {
@@ -193,8 +239,19 @@ function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo;
           <button className="icon-btn" title="실행 취소 (⌘Z · 두 손가락 탭)" disabled={!st.canUndo} onClick={() => editor.undo()}><Icon.undo /></button>
           <button className="icon-btn" title="다시 실행 (⇧⌘Z · 세 손가락 탭)" disabled={!st.canRedo} onClick={() => editor.redo()}><Icon.redo /></button>
           <span className="divider" />
+          <button className={`icon-btn${searchOpen ? ' active' : ''}`} title="찾기 (⌘F) — 손글씨·텍스트·PDF" onClick={() => setSearchOpen((v) => !v)}><Icon.search /></button>
           <button className="icon-btn" title="페이지 추가" onClick={addPage}><Icon.plus /></button>
-          <button className="icon-btn" title="이미지 삽입" onClick={insertImage}><Icon.image /></button>
+          <button className={`icon-btn${panel === 'stickers' ? ' active' : ''}`} title="스티커" onClick={() => setPanel(panel === 'stickers' ? null : 'stickers')}><Icon.sticker /></button>
+          <span className="menu-anchor">
+            <button className={`icon-btn${panel === 'image' ? ' active' : ''}`} title="사진·이미지 넣기" onClick={() => setPanel(panel === 'image' ? null : 'image')}><Icon.image /></button>
+            {panel === 'image' && (
+              <div className="pop-menu" role="menu">
+                <button role="menuitem" onClick={() => insertImage('photos')}><Icon.image /> 사진 보관함</button>
+                <button role="menuitem" onClick={() => insertImage('camera')}><Icon.camera /> 카메라로 찍기</button>
+                <button role="menuitem" onClick={() => insertImage('file')}><Icon.file /> 파일에서</button>
+              </div>
+            )}
+          </span>
           <button className="icon-btn" title="PDF 삽입 (파일을 끌어다 놓아도 됩니다)" onClick={() => insertPdf()}><Icon.file /></button>
           <button className="icon-btn" title="PDF로 내보내기" onClick={doExport}><Icon.share /></button>
           <ThemeButton />
@@ -212,6 +269,9 @@ function EditorChrome({ editor, session, repo, onClose }: Loaded & { repo: Repo;
           <button className="icon-btn" onClick={() => editor.zoomBy(1.25)} title="확대"><Icon.zoomIn /></button>
         </div>
       </div>
+      {/* 패널은 편집 영역 안에 띄운다 (툴바가 두 줄로 바뀌어도 위치가 맞도록) */}
+      {panel === 'stickers' && portal(<StickerPanel editor={editor} library={stickers} repo={repo} onClose={() => setPanel(null)} />)}
+      {searchOpen && portal(<SearchPanel editor={editor} docVersion={st.docVersion} initial={query} recognition={recog} onClose={() => setSearchOpen(false)} />)}
       {busy && <div className="toast">{busy}</div>}
       {dragging && <div className="drop-zone">PDF를 놓으면 현재 페이지 뒤에 삽입해요</div>}
     </>

@@ -3,7 +3,8 @@ import { keyBetween, keysBetween } from './fractional';
 import type { BBox } from './geometry';
 import { objectBBox } from './hittest';
 import { newId } from './ids';
-import type { DocMeta, InkObject, Page, PageBackground, PdfAsset } from './model';
+import type { DocMeta, HwrRecord, InkObject, Page, PageBackground, PdfAsset } from './model';
+import { hwrKey, inkSignature } from './search';
 import { SpatialGrid } from './spatial';
 
 export type Origin = 'local' | 'undo' | 'remote' | 'load';
@@ -17,6 +18,8 @@ export interface ChangeEvent {
   structural: boolean;
   /** 이번 변경으로 새로 생긴 객체 id (기존 객체 수정·삭제가 아님) → 화면에 덧그리기 가능 */
   fresh: Set<string>;
+  /** 손글씨 인식 결과가 바뀐 페이지 id */
+  hwr: Set<string>;
 }
 
 /** 유니온 각 멤버에 Omit 적용 */
@@ -115,6 +118,12 @@ export class InkDocument {
     return out;
   }
 
+  /** 페이지의 손글씨 인식 결과 */
+  hwr(pageId: string): HwrRecord | undefined {
+    const e = this.store.get(hwrKey(pageId));
+    return e?.k === 'hwr' && e.v ? (e.v as HwrRecord) : undefined;
+  }
+
   /** 새 객체의 z 값 (Lamport 시계를 공유하므로 기기 간 인과 순서 보존) */
   nextZ(): number {
     return ++this.clock;
@@ -153,6 +162,14 @@ export class InkDocument {
     this.redoStack = [];
     this.applyInternal(ops, 'local');
     return ops;
+  }
+
+  /**
+   * 손글씨 인식 결과 저장. 필기 내용에서 파생된 데이터라 undo 단계를 만들지 않지만,
+   * 일반 op 처럼 동기화되어 인식기가 없는 기기(웹)에서도 검색할 수 있다.
+   */
+  setHwr(rec: HwrRecord): void {
+    this.applyInternal([{ k: 'hwr', id: hwrKey(rec.pageId), s: this.stamp(), v: rec }], 'local');
   }
 
   /** 지우개 드래그처럼 여러 트랜잭션을 하나의 undo 단계로 묶는다 */
@@ -214,6 +231,7 @@ export class InkDocument {
     const applied: Op[] = [];
     const pages = new Set<string>();
     const fresh = new Set<string>();
+    const hwr = new Set<string>();
     let structural = false;
     for (const op of ops) {
       if (op.s.c > this.clock) this.clock = op.s.c;
@@ -228,6 +246,9 @@ export class InkDocument {
         if (old) pages.add(old.pageId);
         if (nw) pages.add(nw.pageId);
         if (nw && !before) fresh.add(op.id);
+      } else if (op.k === 'hwr') {
+        const r = (op.v ?? before?.v) as HwrRecord | null | undefined;
+        if (r) hwr.add(r.pageId);
       } else {
         structural = true;
         if (op.k === 'page') {
@@ -237,7 +258,7 @@ export class InkDocument {
       }
     }
     if (!applied.length) return;
-    const ev: ChangeEvent = { origin, ops: applied, pages, structural, fresh };
+    const ev: ChangeEvent = { origin, ops: applied, pages, structural, fresh, hwr };
     for (const l of this.listeners) l(ev);
   }
 
@@ -347,6 +368,7 @@ export class InkDocument {
   /**
    * 새 문서. objects[i] 는 i 번째 페이지의 초기 객체들 (가져오기용, z 순서대로).
    * 초기 객체의 z 를 문서 시계보다 앞에 두어, 이후 새로 그린 획이 항상 위에 오도록 한다.
+   * hwr[i] 는 i 번째 페이지의 손글씨 인식 결과 (굿노트 검색 데이터 등).
    */
   static create(
     clientId: string,
@@ -354,6 +376,7 @@ export class InkDocument {
     pages: Array<Pick<Page, 'width' | 'height' | 'bg'>>,
     assets: PdfAsset[] = [],
     objects: Array<Array<DistributiveOmit<InkObject, 'id' | 'pageId' | 'z'>>> = [],
+    hwr: Array<Pick<HwrRecord, 'engine' | 'words'> | undefined> = [],
   ): InkDocument {
     const d = new InkDocument(newId(), clientId);
     const keys = keysBetween(null, null, pages.length);
@@ -376,6 +399,13 @@ export class InkDocument {
       ],
       'local',
     );
+    const hwrOps: Op[] = [];
+    hwr.forEach((h, i) => {
+      if (!h?.words.length || !pageIds[i]) return;
+      const rec: HwrRecord = { pageId: pageIds[i], sig: inkSignature(d.objects(pageIds[i])), at: Date.now(), ...h };
+      hwrOps.push({ k: 'hwr', id: hwrKey(rec.pageId), s: { c: 1, n: clientId }, v: rec });
+    });
+    if (hwrOps.length) d.apply(hwrOps, 'local');
     return d;
   }
 }

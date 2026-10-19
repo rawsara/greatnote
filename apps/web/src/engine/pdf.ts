@@ -134,23 +134,42 @@ export class PdfManager {
     }
   }
 
-  // ── 글자 줄 (밑줄 자동 맞춤용) ──
-  private textCache = new Map<string, TextLine[] | Promise<TextLine[]>>();
+  // ── 글자 (밑줄 자동 맞춤·검색용) ──
+  private itemCache = new Map<string, TextItem[] | Promise<TextItem[]>>();
+  private lineCache = new Map<string, TextLine[]>();
 
   /** 캐시된 글자 줄 (없으면 추출을 시작하고 null) */
   textLines(assetId: string, pageIndex: number): TextLine[] | null {
     const key = `${assetId}:${pageIndex}`;
-    const v = this.textCache.get(key);
+    const lines = this.lineCache.get(key);
+    if (lines) return lines;
+    const items = this.textItems(assetId, pageIndex);
+    if (!items) return null;
+    const built = buildTextLines(items);
+    this.lineCache.set(key, built);
+    return built;
+  }
+
+  /** 캐시된 글자 조각 (없으면 추출을 시작하고 null) */
+  textItems(assetId: string, pageIndex: number): TextItem[] | null {
+    const v = this.itemCache.get(`${assetId}:${pageIndex}`);
     if (Array.isArray(v)) return v;
-    if (!v) {
-      const p = this.extractText(assetId, pageIndex).catch(() => [] as TextLine[]);
-      this.textCache.set(key, p);
-      void p.then((lines) => this.textCache.set(key, lines));
-    }
+    if (!v) void this.loadTextItems(assetId, pageIndex);
     return null;
   }
 
-  private async extractText(assetId: string, pageIndex: number): Promise<TextLine[]> {
+  /** 글자 조각 추출 (검색 전에 PDF 페이지들을 미리 읽을 때) */
+  loadTextItems(assetId: string, pageIndex: number): Promise<TextItem[]> {
+    const key = `${assetId}:${pageIndex}`;
+    const v = this.itemCache.get(key);
+    if (v) return Promise.resolve(v);
+    const p = this.extractText(assetId, pageIndex).catch(() => [] as TextItem[]);
+    this.itemCache.set(key, p);
+    void p.then((items) => this.itemCache.set(key, items));
+    return p;
+  }
+
+  private async extractText(assetId: string, pageIndex: number): Promise<TextItem[]> {
     const doc = await this.open(assetId);
     if (!doc) return [];
     const page = await doc.getPage(pageIndex + 1);
@@ -166,7 +185,7 @@ export class PdfManager {
       const scaleX = Math.hypot(t[0], t[1]) / Math.hypot(it.transform[0], it.transform[1] || 0) || 1;
       items.push({ x: t[4], baseline: t[5], width: it.width * scaleX, height: h, str: it.str });
     }
-    return buildTextLines(items);
+    return items;
   }
 
   destroy(): void {

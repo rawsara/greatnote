@@ -18,7 +18,7 @@ export type InkTool =
   | 'highlighter' // 형광펜: 반투명, 잉크 아래 레이어
   | 'underline'; // 밑줄 도구: 직선 보정
 
-export type ShapeKind = 'line' | 'arrow' | 'rect' | 'ellipse';
+export type ShapeKind = 'line' | 'arrow' | 'rect' | 'ellipse' | 'polygon';
 
 interface ObjBase {
   id: string;
@@ -47,11 +47,15 @@ export interface ShapeObj extends ObjBase {
   color: string;
   width: number;
   opacity: number;
-  /** line/arrow: 시작→끝, rect/ellipse: 대각선 두 꼭짓점 */
+  /** line/arrow: 시작→끝, rect/ellipse/polygon: 대각선 두 꼭짓점 (polygon 은 pts 의 bbox) */
   x1: number;
   y1: number;
   x2: number;
   y2: number;
+  /** 채우기 색 (#rrggbb) — 스티커처럼 면이 있는 도형. width 0 이면 테두리 없음 */
+  fill?: string;
+  /** polygon 꼭짓점 [x, y, x, y, ...] (닫힌 다각형) */
+  pts?: number[];
 }
 
 /** 단어 암기용 테이프: 탭하면 가림/보임이 토글된다 */
@@ -92,6 +96,8 @@ export interface TextObj extends ObjBase {
   bold: boolean;
   color: string;
   flow?: boolean;
+  /** 줄 정렬 (기본 왼쪽) — 스티커 라벨 등 */
+  align?: 'center';
 }
 
 export type InkObject = StrokeObj | ShapeObj | TapeObj | ImageObj | TextObj;
@@ -130,3 +136,26 @@ export interface PdfAsset {
 export type Asset = PdfAsset;
 
 export const A4 = { width: 595.28, height: 841.89 } as const;
+
+/** 손글씨 인식 단어 하나 (페이지 좌표 pt) */
+export interface HwrWord {
+  /** 가장 유력한 인식 결과 */
+  t: string;
+  /** 다른 후보들 (검색 정확도를 높이기 위해 함께 검사) */
+  alt?: string[];
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** 페이지 한 장의 손글씨 인식 결과 */
+export interface HwrRecord {
+  pageId: string;
+  /** 인식 당시 필기 획 서명 — 획이 바뀌면 다시 인식 */
+  sig: string;
+  /** 'goodnotes' | 'vision' | 'mlkit' ... */
+  engine: string;
+  words: HwrWord[];
+  at: number;
+}

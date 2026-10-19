@@ -1,6 +1,4 @@
 node_modules
 dist
 apps/server/data
-apps/web/ios
-apps/web/android
 *.log

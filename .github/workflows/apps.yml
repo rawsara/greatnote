@@ -1,0 +1,69 @@
+name: Apps
+
+# 웹 테스트 + Android APK + iOS 빌드 확인.
+# Android: Actions 실행 결과의 "inknote-android-debug" 아티팩트(APK)를 받아 기기에 설치할 수 있다.
+# iOS: 서명 없이 시뮬레이터용으로 컴파일만 확인 (iPad 설치는 docs/NATIVE.md — Mac 의 Xcode + 무료 Apple ID).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - run: npm run build
+      - name: Sync Capacitor
+        working-directory: apps/web
+        run: npx cap sync android
+      - name: Build debug APK
+        working-directory: apps/web/android
+        run: ./gradlew assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inknote-android-debug
+          path: apps/web/android/app/build/outputs/apk/debug/app-debug.apk
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Sync Capacitor
+        working-directory: apps/web
+        run: npx cap sync ios
+      - name: Build for simulator (unsigned)
+        working-directory: apps/web/ios/App
+        run: |
+          xcodebuild -project App.xcodeproj -scheme App -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build | tail -n 60
+          exit ${PIPESTATUS[0]}

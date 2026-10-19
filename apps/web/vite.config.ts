@@ -6,5 +6,5 @@ export default defineConfig({
   // Capacitor 는 파일 기반으로 로드하므로 상대 경로 빌드
   base: './',
   build: { target: 'es2022', chunkSizeWarningLimit: 2000 },
-  optimizeDeps: { exclude: ['@inknote/core'] },
+  optimizeDeps: { exclude: ['@inknote/core', '@inknote/ink-recognizer'] },
 });

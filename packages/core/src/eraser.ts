@@ -33,7 +33,8 @@ export function eraseStep(
     if (mode === 'highlighter' && !isHighlighter(o)) continue;
     if (!hitObject(o, ax, ay, bx, by, r)) continue;
     if (o.type === 'image' || o.type === 'text') continue;
-    if (mode !== 'partial' || o.type === 'tape') {
+    // 면이 있는 도형(스티커)은 조각내지 않고 통째로 지운다
+    if (mode !== 'partial' || o.type === 'tape' || (o.type === 'shape' && o.fill)) {
       res.remove.push(o.id);
       continue;
     }

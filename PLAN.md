@@ -132,8 +132,34 @@ C→S push  {batch, ops}     →  S→C ack {batch, seq}   + 다른 구독자에
 
 - `apps/web` 빌드(`dist`)를 iOS WKWebView / Android WebView 에 탑재 (`capacitor.config.ts`).
 - Apple Pencil·S펜 필압은 Pointer Events(`pressure`, `pointerType: 'pen'`) 로 WebView 에서 그대로 들어온다.
-- 로컬 저장: WebView 의 IndexedDB. 내보내기: 네이티브에서는 Web Share 시트로 파일 앱 저장/공유.
+- 로컬 저장: WebView 의 IndexedDB. 내보내기: Filesystem(임시 파일) + Share 플러그인 → 공유 시트로 파일 앱 저장/공유.
 - `touch-action: none`, iOS 롱프레스 확대경 방지, safe-area 대응.
+- 네이티브 프로젝트: `apps/web/ios` (Swift Package Manager — CocoaPods 불필요), `apps/web/android`. 설치 방법은 `docs/NATIVE.md`.
+- 플러그인: Camera(사진 보관함·촬영), Filesystem·Share(내보내기), App("InkNote 로 열기": iOS 문서 유형/UTI, Android VIEW 인텐트),
+  로컬 플러그인 `packages/ink-recognizer`(손글씨 인식).
+- CI(`.github/workflows/apps.yml`): 테스트 + Android 디버그 APK 아티팩트 + iOS 시뮬레이터 컴파일.
+
+## 8-2. 손글씨 검색
+
+- **데이터**: 페이지마다 `hwr` 엔티티 `{ sig, engine, words: [{ t, alt?, x, y, w, h }] }` (페이지 좌표 pt).
+  일반 op 로 동기화되지만 undo 단계는 만들지 않는다(필기에서 파생된 데이터). `sig` = 필기 획 id·위치 해시 — 같으면 다시 인식하지 않음.
+- **인식(기기 내장)**: 필기를 멈추고 ~2초 뒤 바뀐 페이지만 큐에 넣어 하나씩 처리 (`web/recognize/scheduler.ts`).
+  - iOS/iPadOS: 필기 획만 흰 바탕에 그린 이미지(필기 영역만 잘라 긴 변 2400px) → Vision `VNRecognizeTextRequest`(ko-KR, en-US) → 줄·단어 위치 + 후보
+  - Android: 획을 줄 단위로 묶어(`core/search.ts groupStrokesIntoLines`) ML Kit Digital Ink(`ko`) → 줄마다 후보 → 글자 수 비례로 단어 위치
+  - 웹: 인식기 없음 → 다른 기기·굿노트에서 동기화된 결과로 검색
+- **굿노트 가져오기**: `search/<노트 id>` 의 인식 결과(단어 영역 + 후보 최대 5개)를 그대로 `hwr` 로 변환 → 가져오자마자 검색 가능.
+- **검색** (`core/search.ts`): NFKC + 소문자 + 공백 무시한 "글자 흐름" 에서 찾아 인식기의 잘못된 띄어쓰기에 강함. 2·3순위 후보도 검사.
+  단어 안 일부만 맞으면 글자 수 비례로 그 부분만 강조. 텍스트 상자(글자 위치 → 줄 배치로 강조), PDF 글자(pdf.js 텍스트)도 함께.
+  라이브러리 검색은 저장 때 만든 페이지별 평문 색인(`DocMetaRecord.text`)으로.
+
+## 8-3. 스티커 · 사진
+
+- 채운 다각형 도형(`ShapeObj { shape: 'polygon', pts, fill }`) 추가 — 기본 스티커 팩을 벡터로 그림(PDF 로도 벡터 출력).
+  채운 도형은 지우개로 문지르면 통째로 지워지고, 색 바꾸기는 채우기 색을 바꾼다. 텍스트 상자에 가운데 정렬(`align`) 추가(라벨 스티커).
+- 붙인 스티커는 묶음(group)으로 한 번에 선택·이동·크기 조절.
+- 내 스티커 보관함 = 고정 id(`stickers`) 문서. 스티커 한 장 = 페이지 하나(크기 = 스티커 bbox) → 노트와 같은 경로로 기기 간 동기화,
+  이미지 스티커의 원본은 에셋(SHA-256)으로 함께 업로드. 노트 목록에서는 숨김.
+- 사진: 앱은 Camera 플러그인(보관함/촬영, 긴 변 2400px 로 줄임), 웹은 파일 선택(모바일 브라우저는 `capture` 로 카메라).
 
 ---
 
@@ -147,7 +173,7 @@ C→S push  {batch, ops}     →  S→C ack {batch, seq}   + 다른 구독자에
 | `index.events.pb` | 용지(크기 + 템플릿 PDF 첨부), 페이지(용지·순서 키), 문서 제목 |
 | `notes/<uuid>` | 페이지 내용: varint 길이 접두 protobuf 레코드 (헤더, 요소) 쌍 |
 | `attachments/<uuid>` | 속지 템플릿 PDF, 이미지(JPEG 등) |
-| `search/<uuid>` | 손글씨 인식 결과 (현재 미사용 — 향후 검색) |
+| `search/<uuid>` | 손글씨 인식 결과 (단어 영역 + 후보 문자열) → 검색 데이터로 가져옴 |
 
 요소 종류와 변환:
 - **획(필드 7)**: 좌표는 Apple LZ4(`bv41`) 로 압축된 자기 기술형 `tpl` 데이터. 시그니처(`vA(v)A(u)…`)로 형식을 판별하고
@@ -175,9 +201,11 @@ C→S push  {batch, ops}     →  S→C ack {batch, seq}   + 다른 구독자에
 | 이미지·텍스트 상자 객체 (올가미 이동·크기 조절, 텍스트 도구로 편집, PDF 내보내기, 동기화) | ✅ | `core/model.ts`, `web/engine/render.ts`, `Editor.ts` |
 | PDF 열람/가져오기/페이지 편집/내보내기 | ✅ | `web/engine/pdf.ts`, `exportPdf.ts` |
 | 오프라인 저장 + 동기화 서버 | ✅ | `web/sync`, `apps/server` |
-| Capacitor iOS/Android 설정 | ✅ (네이티브 프로젝트 생성은 Mac/Android SDK 에서) | `apps/web/capacitor.config.ts` |
+| 손글씨 검색 (기기 내장 인식, 굿노트 인식 데이터, 노트·라이브러리 검색) | ✅ | `core/search.ts`, `web/recognize/`, `packages/ink-recognizer` |
+| 스티커 (기본 팩, 내 스티커 동기화, 사진 스티커), 사진·카메라 넣기 | ✅ | `web/stickers/`, `web/ui/StickerPanel.tsx` |
+| iOS/Android 네이티브 프로젝트 + 파일 열기 + 공유 내보내기 + CI | ✅ (네이티브 빌드는 CI/Mac 에서 확인) | `apps/web/ios`, `apps/web/android`, `.github/workflows` |
 
-테스트: 코어 38개 + 서버 2개 단위 테스트, 브라우저 E2E 39개 항목 (합성 굿노트 파일 가져오기 포함)(실제 펜 이벤트·필압, 지우개 3종, 올가미 8핸들, 멈추면 직선, 밑줄 PDF 맞춤, 덧그리기 확인, 손가락 탭 undo/redo, 다크 모드, 드래그 앤 드롭, PDF 왕복, 2기기 동기화·undo 전파).
+테스트: 코어 51개 + 서버 2개 단위 테스트, 브라우저 E2E 51개 항목 (합성 굿노트 파일 가져오기·검색·스티커·인식 파이프라인 포함)(실제 펜 이벤트·필압, 지우개 3종, 올가미 8핸들, 멈추면 직선, 밑줄 PDF 맞춤, 덧그리기 확인, 손가락 탭 undo/redo, 다크 모드, 드래그 앤 드롭, PDF 왕복, 2기기 동기화·undo 전파).
 
 ## 10. 다음 단계 (로드맵)
 
@@ -185,5 +213,5 @@ C→S push  {batch, ops}     →  S→C ack {batch, seq}   + 다른 구독자에
 2. **iOS 지연 최적화**: Capacitor 플러그인으로 `UITouch.predictedTouches`/`coalescedTouches` 기반 네이티브 잉크 레이어(PencilKit 또는 Metal) — 데이터 포맷은 동일하게 유지.
 3. **대용량 문서**: 페이지별 lazy 로딩, 화면 타일 비트맵 캐시(팬 시 재렌더 최소화), IndexedDB 증분 저장(현재는 스냅샷 전체 저장).
 4. **백그라운드 동기화**: 라이브러리에서 미전송 outbox 가 있는 모든 문서를 순회 동기화, 문서 삭제 tombstone.
-5. **기능**: 다크 모드용 어두운 속지, 올가미 회전, 텍스트 상자·이미지, 도형 자동 인식(펜 멈춤), 필기 인식/검색(OCR), PDF 링크/목차, 다중 PDF 페이지 썸네일 그리드.
+5. **기능**: 다크 모드용 어두운 속지, 올가미 회전, 도형 자동 인식(펜 멈춤), 스티커 배경 지우기, PDF 링크/목차, 다중 PDF 페이지 썸네일 그리드.
 6. **동시 편집 고도화**: 같은 획을 동시에 이동+부분삭제하는 경우의 의도 보존이 필요하면 객체 내부를 시퀀스 CRDT 로 세분화.

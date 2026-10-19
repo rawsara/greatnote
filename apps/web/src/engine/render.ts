@@ -54,12 +54,38 @@ export function layoutText(o: TextObj): string[] {
   return lines;
 }
 
+/** 텍스트 상자 안 글자 범위([start, start+len), 코드포인트 단위)의 화면 배치 영역 (줄마다 하나) */
+export function textRangeRects(o: TextObj, start: number, len: number): BBox[] {
+  const chars = [...o.text];
+  const s = chars.slice(0, start).join('').length;
+  const e = s + chars.slice(start, start + len).join('').length;
+  measureCtx ??= document.createElement('canvas').getContext('2d');
+  const ctx = measureCtx!;
+  ctx.font = textFont(o);
+  const lh = o.fontSize * TEXT_LINE;
+  const out: BBox[] = [];
+  let cursor = 0;
+  layoutText(o).forEach((line, i) => {
+    const at = line ? o.text.indexOf(line, cursor) : cursor;
+    if (at < 0) return;
+    const a = Math.max(s, at), b = Math.min(e, at + line.length);
+    cursor = at + line.length;
+    if (a >= b) return;
+    const shift = o.align === 'center' ? (o.w - ctx.measureText(line).width) / 2 : 0;
+    const x0 = shift + ctx.measureText(line.slice(0, a - at)).width, x1 = shift + ctx.measureText(line.slice(0, b - at)).width;
+    out.push({ minX: o.x + x0, minY: o.y + i * lh, maxX: o.x + x1, maxY: o.y + (i + 1) * lh });
+  });
+  return out;
+}
+
 export function drawText(ctx: CanvasRenderingContext2D, o: TextObj): void {
   ctx.font = textFont(o);
   ctx.fillStyle = o.color;
   ctx.textBaseline = 'top';
   const lh = o.fontSize * TEXT_LINE;
-  layoutText(o).forEach((line, i) => ctx.fillText(line, o.x, o.y + i * lh + (lh - o.fontSize) / 2));
+  const center = o.align === 'center';
+  if (center) ctx.textAlign = 'center';
+  layoutText(o).forEach((line, i) => ctx.fillText(line, center ? o.x + o.w / 2 : o.x, o.y + i * lh + (lh - o.fontSize) / 2));
 }
 
 function drawImageObj(ctx: CanvasRenderingContext2D, o: ImageObj): void {
@@ -176,11 +202,17 @@ export function drawObject(ctx: CanvasRenderingContext2D, o: InkObject, opts: Dr
     }
     case 'shape':
       ctx.globalAlpha = o.opacity;
-      ctx.strokeStyle = o.color;
-      ctx.lineWidth = o.width;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.stroke(path);
+      if (o.fill) {
+        ctx.fillStyle = o.fill;
+        ctx.fill(path, 'evenodd');
+      }
+      if (o.width > 0) {
+        ctx.strokeStyle = o.color;
+        ctx.lineWidth = o.width;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke(path);
+      }
       break;
     case 'tape': {
       if (o.revealed) {

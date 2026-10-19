@@ -171,7 +171,7 @@ export function ToolOptions({ editor, st }: { editor: Editor; st: EditorUIState 
 }
 
 /** 올가미 선택 시 떠 있는 메뉴 */
-export function SelectionMenu({ editor, st }: { editor: Editor; st: EditorUIState }) {
+export function SelectionMenu({ editor, st, onSaveSticker }: { editor: Editor; st: EditorUIState; onSaveSticker?: () => void }) {
   if (!st.selection) return null;
   return (
     <div className="selection-menu" role="toolbar" aria-label="선택 항목">
@@ -183,6 +183,7 @@ export function SelectionMenu({ editor, st }: { editor: Editor; st: EditorUIStat
       </div>
       <button className="text-btn" onClick={() => editor.duplicateSelection()}><Icon.copy /> 복제</button>
       <button className="text-btn" onClick={() => editor.copySelection()}>복사</button>
+      {onSaveSticker && <button className="text-btn" onClick={onSaveSticker} title="내 스티커에 저장"><Icon.sticker /> 스티커로</button>}
       <button className="text-btn danger" onClick={() => editor.deleteSelection()}><Icon.trash /> 삭제</button>
     </div>
   );

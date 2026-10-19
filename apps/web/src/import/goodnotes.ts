@@ -95,7 +95,8 @@ export async function importGoodnotes(file: File, repo: Repo, onProgress?: (msg:
   onProgress?.(`${r.pages.length}쪽 저장 중…`);
   const fromName = file.name.replace(/\.goodnotes$/i, '').trim();
   const title = fromName && !/^_+$/.test(fromName) ? fromName : r.title;
-  const doc = await repo.create(title, pages, assets, objects);
+  const hwr = r.pages.map((p) => (p.hwr?.length ? { engine: 'goodnotes', words: p.hwr } : undefined));
+  const doc = await repo.create(title, pages, assets, objects, hwr);
   lap('document created');
   return { docId: doc.id, title, pages: pages.length, stats: r.stats, warnings };
 }

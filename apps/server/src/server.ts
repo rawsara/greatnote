@@ -82,7 +82,7 @@ class DocState {
   }
 }
 
-const ENTITY_KINDS = new Set<EntityKind>(['meta', 'page', 'obj', 'asset']);
+const ENTITY_KINDS = new Set<EntityKind>(['meta', 'page', 'obj', 'asset', 'hwr']);
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const SHA_RE = /^[a-f0-9]{64}$/;
 

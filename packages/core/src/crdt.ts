@@ -19,7 +19,8 @@ export interface Stamp {
   n: string;
 }
 
-export type EntityKind = 'meta' | 'page' | 'obj' | 'asset';
+/** hwr: 페이지별 손글씨 인식 결과 (검색용, undo 대상 아님) */
+export type EntityKind = 'meta' | 'page' | 'obj' | 'asset' | 'hwr';
 
 export interface Op<V = unknown> {
   k: EntityKind;

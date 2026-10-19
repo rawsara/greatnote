@@ -1,4 +1,6 @@
-import { InkDocument, newId, type DistributiveOmit, type DocSnapshot, type InkObject, type Op, type Page, type PdfAsset } from '@inknote/core';
+import {
+  InkDocument, documentPlainText, newId, type DistributiveOmit, type DocSnapshot, type HwrRecord, type InkObject, type Op, type Page, type PdfAsset,
+} from '@inknote/core';
 
 /**
  * 로컬 저장소 (IndexedDB) — 웹 브라우저와 Capacitor WebView(iOS/Android) 모두에서 동작.
@@ -13,6 +15,8 @@ export interface DocMetaRecord {
   title: string;
   updatedAt: number;
   pageCount: number;
+  /** 라이브러리 검색 색인: 페이지별 손글씨 인식 결과 + 텍스트 상자 글자 */
+  text?: string[];
 }
 
 export interface DocRecord {
@@ -58,7 +62,8 @@ export class Repo {
   }
 
   async list(): Promise<DocMetaRecord[]> {
-    const all = (await req(this.store('meta').getAll())) as DocMetaRecord[];
+    // 스티커 보관함은 노트 목록에서 숨김
+    const all = ((await req(this.store('meta').getAll())) as DocMetaRecord[]).filter((d) => d.id !== 'stickers');
     return all.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
@@ -69,7 +74,10 @@ export class Repo {
   async save(doc: InkDocument, lastSeq: number, outbox: Op[]): Promise<void> {
     const tx = this.db.transaction(['docs', 'meta'], 'readwrite');
     const rec: DocRecord = { id: doc.id, snapshot: doc.toSnapshot(), lastSeq, outbox };
-    const meta: DocMetaRecord = { id: doc.id, title: doc.meta.title, updatedAt: Date.now(), pageCount: doc.pages.length };
+    const meta: DocMetaRecord = {
+      id: doc.id, title: doc.meta.title, updatedAt: Date.now(), pageCount: doc.pages.length,
+      text: documentPlainText({ pages: doc.pages, objects: (id) => doc.objects(id), hwr: (id) => doc.hwr(id) }),
+    };
     tx.objectStore('docs').put(rec, doc.id);
     tx.objectStore('meta').put(meta, doc.id);
     await new Promise<void>((res, rej) => {
@@ -84,8 +92,9 @@ export class Repo {
     pages: Array<Pick<Page, 'width' | 'height' | 'bg'>>,
     assets: PdfAsset[] = [],
     objects: Array<Array<DistributiveOmit<InkObject, 'id' | 'pageId' | 'z'>>> = [],
+    hwr: Array<Pick<HwrRecord, 'engine' | 'words'> | undefined> = [],
   ): Promise<InkDocument> {
-    const doc = InkDocument.create(this.clientId, title, pages, assets, objects);
+    const doc = InkDocument.create(this.clientId, title, pages, assets, objects, hwr);
     await this.save(doc, 0, doc.toSnapshot().ops);
     return doc;
   }

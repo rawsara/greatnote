@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { A4, type PaperKind, type RemoteDocInfo } from '@inknote/core';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { A4, normalizeQuery, searchPlainText, type PaperKind, type RemoteDocInfo } from '@inknote/core';
 import { getServerUrl, httpBase, setServerUrl, type DocMetaRecord, type Repo } from '../storage/repo';
 import { importPdf, pickFile } from './files';
 import { ThemeButton } from './ThemeButton';
@@ -14,11 +14,19 @@ interface Item {
   pageCount?: number;
   local: boolean;
   remote: boolean;
+  /** 페이지별 검색 색인 */
+  text?: string[];
 }
 
 const PAPERS: Array<[PaperKind, string]> = [['blank', '무지'], ['lined', '줄노트'], ['grid', '모눈'], ['dotted', '점선']];
 
-export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => void }) {
+export function Library({ repo, onOpen, incoming, onIncomingHandled }: {
+  repo: Repo;
+  onOpen: (id: string, query?: string) => void;
+  /** 다른 앱에서 열기로 받은 파일 */
+  incoming?: File | null;
+  onIncomingHandled?: () => void;
+}) {
   const [items, setItems] = useState<Item[]>([]);
   const [remoteState, setRemoteState] = useState<'off' | 'ok' | 'error'>('off');
   const [newOpen, setNewOpen] = useState(false);
@@ -26,6 +34,16 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
   const [server, setServer] = useState(getServerUrl());
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<GoodnotesImportResult | null>(null);
+  const [query, setQuery] = useState('');
+
+  // 노트 전체 검색: 제목 + 손글씨 인식 결과 + 텍스트 상자 (로컬에 있는 노트)
+  const shown = useMemo(() => {
+    const q = normalizeQuery(query);
+    if (!q) return items.map((it) => ({ it, pages: [] as number[] }));
+    return items
+      .map((it) => ({ it, pages: searchPlainText(it.text ?? [], query), title: normalizeQuery(it.title).includes(q) }))
+      .filter((r) => r.title || r.pages.length);
+  }, [items, query]);
 
   const refresh = useCallback(async () => {
     const local: DocMetaRecord[] = await repo.list();
@@ -35,7 +53,7 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
       try {
         const res = await fetch(`${httpBase(url)}/api/docs`);
         const remote = (await res.json()) as RemoteDocInfo[];
-        for (const r of remote) {
+        for (const r of remote.filter((d) => d.id !== 'stickers')) {
           const cur = map.get(r.id);
           if (cur) cur.remote = true;
           else map.set(r.id, { id: r.id, title: r.title, updatedAt: r.updatedAt, local: false, remote: true });
@@ -96,6 +114,14 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
     (f) => isPdf(f) || isGoodnotesFile(f),
   );
 
+  useEffect(() => {
+    if (!incoming) return;
+    onIncomingHandled?.();
+    if (isGoodnotesFile(incoming)) void fromGoodnotes(incoming);
+    else if (isPdf(incoming)) void fromPdf(incoming);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incoming]);
+
   const remove = async (it: Item) => {
     if (!confirm(`"${it.title}"을(를) 이 기기에서 삭제할까요?`)) return;
     await repo.remove(it.id);
@@ -126,6 +152,10 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
           <span className={`sync-badge ${remoteState === 'ok' ? 'synced' : remoteState === 'error' ? 'offline' : 'local'}`}>
             <Icon.cloud /> {remoteState === 'ok' ? '서버 연결됨' : remoteState === 'error' ? '서버 연결 실패' : '로컬 전용'}
           </span>
+          <label className="lib-search">
+            <Icon.search />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="모든 노트에서 찾기 (손글씨 포함)" aria-label="모든 노트에서 찾기" />
+          </label>
           <ThemeButton />
           <button className="icon-btn" title="동기화 설정" onClick={() => setSettingsOpen((v) => !v)}><Icon.settings /></button>
           <button className="primary-btn" onClick={() => setNewOpen((v) => !v)}><Icon.plus /> 새 노트</button>
@@ -165,9 +195,10 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
 
       <main className="grid">
         {items.length === 0 && <p className="empty">노트가 없습니다. “새 노트”, “PDF 가져오기”, “굿노트 가져오기” 또는 파일을 이 화면에 끌어다 놓으세요.</p>}
-        {items.map((it) => (
+        {items.length > 0 && query.trim() && !shown.length && <p className="empty">“{query}”가 들어 있는 노트가 없어요</p>}
+        {shown.map(({ it, pages }) => (
           <div key={it.id} className="card">
-            <button className="card-cover" onClick={() => onOpen(it.id)} aria-label={`${it.title} 열기`}>
+            <button className="card-cover" onClick={() => onOpen(it.id, pages.length ? query : undefined)} aria-label={`${it.title} 열기`}>
               <span className="cover-title">{it.title}</span>
             </button>
             <div className="card-meta">
@@ -178,6 +209,11 @@ export function Library({ repo, onOpen }: { repo: Repo; onOpen: (id: string) => 
                   {it.pageCount ? ` · ${it.pageCount}쪽` : ''}
                   {it.remote && !it.local ? ' · 클라우드' : it.remote ? ' · 동기화' : ''}
                 </div>
+                {pages.length > 0 && (
+                  <div className="card-hit">
+                    {pages.slice(0, 6).map((p) => `${p + 1}쪽`).join(', ')}{pages.length > 6 ? ` 외 ${pages.length - 6}쪽` : ''}에서 찾음
+                  </div>
+                )}
               </div>
               {it.local && (
                 <button className="icon-btn small" title="이 기기에서 삭제" onClick={() => remove(it)}><Icon.trash /></button>

@@ -31,6 +31,14 @@ export function traceShape(sink: PathSink, s: ShapeObj): void {
       sink.closePath();
       break;
     }
+    case 'polygon': {
+      const p = s.pts ?? [];
+      if (p.length < 4) break;
+      sink.moveTo(p[0], p[1]);
+      for (let i = 2; i < p.length; i += 2) sink.lineTo(p[i], p[i + 1]);
+      sink.closePath();
+      break;
+    }
     case 'ellipse': {
       const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
       const rx = Math.abs(x2 - x1) / 2, ry = Math.abs(y2 - y1) / 2;
@@ -73,6 +81,14 @@ export function shapeToPolyline(s: ShapeObj, step = 3): number[] {
       seg(l, b, l, t, true);
       break;
     }
+    case 'polygon': {
+      const p = s.pts ?? [];
+      for (let i = 0; i + 1 < p.length; i += 2) {
+        const j = (i + 2) % p.length;
+        seg(p[i], p[i + 1], p[j], p[j + 1], j === 0);
+      }
+      break;
+    }
     case 'ellipse': {
       const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
       const rx = Math.abs(x2 - x1) / 2, ry = Math.abs(y2 - y1) / 2;
@@ -85,6 +101,16 @@ export function shapeToPolyline(s: ShapeObj, step = 3): number[] {
     }
   }
   return out;
+}
+
+/** 꼭짓점 배열로 polygon 도형 만들기 (bbox 계산 포함) */
+export function polygonShape(pts: number[], style: { color: string; width: number; opacity?: number; fill?: string }): Omit<ShapeObj, 'id' | 'pageId' | 'z'> {
+  let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+  for (let i = 0; i + 1 < pts.length; i += 2) {
+    x1 = Math.min(x1, pts[i]); x2 = Math.max(x2, pts[i]);
+    y1 = Math.min(y1, pts[i + 1]); y2 = Math.max(y2, pts[i + 1]);
+  }
+  return { type: 'shape', shape: 'polygon', color: style.color, width: style.width, opacity: style.opacity ?? 1, fill: style.fill, pts, x1, y1, x2, y2 };
 }
 
 /** 테이프의 사각형 꼭짓점 [x,y]*4 */

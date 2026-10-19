@@ -1,5 +1,5 @@
 import {
-  bboxAddPoint, bboxOfFlat, distPointToSegmentSq, distSegmentToSegmentSq, emptyBBox, type BBox,
+  bboxAddPoint, bboxOfFlat, distPointToSegmentSq, distSegmentToSegmentSq, emptyBBox, pointInPolygon, type BBox,
 } from './geometry';
 import { STRIDE, type InkObject, type StrokeObj } from './model';
 import { shapeToPolyline, tapePolygon } from './shapes';
@@ -64,6 +64,12 @@ export function hitObject(o: InkObject, ax: number, ay: number, bx: number, by: 
     return distSegmentToSegmentSq(ax, ay, bx, by, o.x1, o.y1, o.x2, o.y2) <= lim * lim;
   }
   const pts = objectPoints(o);
+  if (o.type === 'shape' && o.fill) {
+    // 채운 도형: 안쪽을 문질러도 지워진다
+    const flat: number[] = [];
+    for (let i = 0; i < pts.length; i += STRIDE) flat.push(pts[i], pts[i + 1]);
+    if (pointInPolygon(bx, by, flat)) return true;
+  }
   const width = o.width;
   const n = pts.length / STRIDE;
   if (n === 1) {

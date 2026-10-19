@@ -1,6 +1,6 @@
 import {
   A4, TOOL_PRESETS, bboxIntersects, isHighlighter, newId, objectBBox, selectionBBox, transformObject, affineTranslate,
-  type ChangeEvent, type ImageObj, type InkDocument, type InkObject, type InkTool, type Page, type TextLine, type TextObj,
+  type BBox, type ChangeEvent, type ImageObj, type SearchHit, type InkDocument, type InkObject, type InkTool, type Page, type TextLine, type TextObj,
 } from '@inknote/core';
 import {
   EraserGesture, InkGesture, LassoGesture, RulerGesture, ShapeGesture, TapeGesture, TextGesture, TransformGesture,
@@ -8,7 +8,7 @@ import {
 } from './gestures';
 import type { ImageManager } from './images';
 import type { PdfManager } from './pdf';
-import { TEXT_FONT, TEXT_LINE, drawInkLayer, drawObject, drawObjects, drawPaper, drawUnderLayer, layoutText, pageObjects } from './render';
+import { TEXT_FONT, TEXT_LINE, drawInkLayer, drawObject, drawObjects, drawPaper, drawUnderLayer, layoutText, pageObjects, textRangeRects } from './render';
 import type { EditorHost, EditorUIState, Gesture, PageRect, RulerState, Selection, SnapLine, ToolId } from './types';
 
 const GAP = 28;
@@ -519,6 +519,7 @@ export class Editor implements EditorHost {
       ctx.restore();
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     }
+    if (this.search) this.drawSearch(ctx);
     if (this.hover && !this.gesture && this.state.tool === 'eraser') {
       drawEraserCursor(ctx, this.hover.x, this.hover.y, this.state.eraserSize / 2);
     }
@@ -535,6 +536,69 @@ export class Editor implements EditorHost {
 
   textLines(page: Page): TextLine[] | null {
     return page.bg.kind === 'pdf' ? this.pdf.textLines(page.bg.assetId, page.bg.pageIndex) : null;
+  }
+
+  // ───────────────────────── 검색 결과 강조 ─────────────────────────
+
+  private search: { hits: SearchHit[]; active: number } | null = null;
+
+  /** 검색 결과 강조 표시 (null 이면 끄기). focus 면 active 결과로 화면 이동 */
+  setSearch(hits: SearchHit[] | null, active = -1, focus = true): void {
+    this.search = hits?.length ? { hits, active } : null;
+    const h = hits?.[active];
+    if (h && focus) this.focusRect(h.pageId, this.hitRects(h));
+    else this.schedule();
+  }
+
+  private hitRects(h: SearchHit): BBox[] {
+    if (h.kind === 'text' && h.objId && h.start !== undefined) {
+      const o = this.doc.object(h.objId);
+      if (o?.type === 'text') {
+        const r = textRangeRects(o, h.start, h.length ?? 0);
+        if (r.length) return r;
+      }
+    }
+    return h.rects;
+  }
+
+  /** 페이지 영역이 화면 안에 들어오도록 이동 (이미 보이면 그대로) */
+  focusRect(pageId: string, rects: BBox[]): void {
+    const r = this.rectOf(pageId);
+    if (!r || !rects.length) return;
+    const b = rects.reduce((a, c) => ({ minX: Math.min(a.minX, c.minX), minY: Math.min(a.minY, c.minY), maxX: Math.max(a.maxX, c.maxX), maxY: Math.max(a.maxY, c.maxY) }));
+    const view = this.viewRect();
+    const pad = 40 / this.zoom;
+    const inside = r.x + b.minX >= view.minX + pad && r.x + b.maxX <= view.maxX - pad && r.y + b.minY >= view.minY + pad && r.y + b.maxY <= view.maxY - pad;
+    if (!inside) {
+      this.panX = this.cw / 2 - (r.x + (b.minX + b.maxX) / 2) * this.zoom;
+      this.panY = this.ch / 2 - (r.y + (b.minY + b.maxY) / 2) * this.zoom;
+      this.clampPan();
+      this.afterViewportChange();
+    } else this.schedule();
+  }
+
+  private drawSearch(ctx: CanvasRenderingContext2D): void {
+    const s = this.search!;
+    const view = this.viewRect();
+    s.hits.forEach((h, i) => {
+      const rect = this.rectOf(h.pageId);
+      if (!rect || rect.y > view.maxY || rect.y + rect.page.height < view.minY) return;
+      this.pageTransform(ctx, rect);
+      const active = i === s.active;
+      for (const b of this.hitRects(h)) {
+        const p = 1.5;
+        ctx.fillStyle = active ? 'rgba(255,149,0,0.38)' : 'rgba(255,214,10,0.32)';
+        ctx.beginPath();
+        ctx.roundRect(b.minX - p, b.minY - p, b.maxX - b.minX + p * 2, b.maxY - b.minY + p * 2, 3);
+        ctx.fill();
+        if (active) {
+          ctx.strokeStyle = '#ff8a00';
+          ctx.lineWidth = 1.6 / this.zoom;
+          ctx.stroke();
+        }
+      }
+    });
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
   }
 
   // ───────────────────────── 자(ruler) ─────────────────────────
@@ -653,7 +717,8 @@ export class Editor implements EditorHost {
     this.invalidate(true);
   }
 
-  private selectedObjects(): InkObject[] {
+  /** 선택된 객체 (스티커로 저장 등) */
+  selectedObjects(): InkObject[] {
     const sel = this.state.selection;
     return sel ? sel.ids.map((id) => this.doc.object(id)).filter((o): o is InkObject => !!o) : [];
   }
@@ -668,7 +733,9 @@ export class Editor implements EditorHost {
   recolorSelection(color: string): void {
     const objs = this.selectedObjects();
     const colorable = objs.filter((o) => o.type !== 'image');
-    if (colorable.length) this.doc.updateObjects(colorable.map((o) => ({ ...o, color }) as InkObject), '색상 변경');
+    // 면이 있는 도형(스티커)은 채우기 색을 바꾼다
+    const recolor = (o: InkObject) => (o.type === 'shape' && o.fill ? { ...o, fill: color } : { ...o, color }) as InkObject;
+    if (colorable.length) this.doc.updateObjects(colorable.map(recolor), '색상 변경');
   }
 
   copySelection(): void {
@@ -789,6 +856,31 @@ export class Editor implements EditorHost {
     this.doc.addObjects([img], '이미지');
     this.update({ tool: 'lasso' });
     this.setSelection({ pageId: page.id, ids: [img.id] });
+  }
+
+  /**
+   * 스티커 붙이기: 지금 보고 있는 화면 가운데에, 여러 조각이면 하나로 묶어서(group) 넣고 선택한다.
+   * items 는 (0,0)~(w,h) 상자 기준 좌표. 페이지 폭의 40% 보다 크면 줄인다.
+   */
+  insertSticker(items: Array<Omit<InkObject, 'id' | 'pageId' | 'z'>>, w: number, h: number): string[] {
+    const pageId = this.state.currentPageId;
+    const rect = pageId ? this.rectOf(pageId) : this.rects[0];
+    if (!rect || !items.length) return [];
+    const { page } = rect;
+    const k = Math.min(1, (page.width * 0.4) / w, (page.height * 0.4) / h);
+    const view = this.viewRect();
+    const cx = Math.max((w * k) / 2, Math.min(page.width - (w * k) / 2, (view.minX + view.maxX) / 2 - rect.x));
+    const cy = Math.max((h * k) / 2, Math.min(page.height - (h * k) / 2, (view.minY + view.maxY) / 2 - rect.y));
+    const m: [number, number, number, number, number, number] = [k, 0, 0, k, cx - (w * k) / 2, cy - (h * k) / 2];
+    const group = items.length > 1 ? newId() : undefined;
+    const objs = items.map((it) => {
+      const o = transformObject({ ...it, id: '', pageId: page.id, z: 0 } as InkObject, m);
+      return { ...o, id: newId(), z: this.doc.nextZ(), ...(group ? { group } : {}) } as InkObject;
+    });
+    this.doc.addObjects(objs, '스티커');
+    this.update({ tool: 'lasso' });
+    this.setSelection({ pageId: page.id, ids: objs.map((o) => o.id) });
+    return objs.map((o) => o.id);
   }
 
   setAllTapes(revealed: boolean): void {

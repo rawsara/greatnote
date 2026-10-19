@@ -87,6 +87,9 @@ const RTF_KO = enc.encode(
 export const RTF_KO_TEXT = cat(RTF_KO, new Uint8Array([0xc7, 0xd1, 0xb1, 0xdb]), enc.encode('\\f1  ABC}')); // "한글 ABC"
 export const RTF_TITLE = enc.encode('{\\rtf1\\ansi{\\fonttbl\\f0\\fnil\\fcharset0 Helvetica-Bold;}\\pard\\f0\\b\\fs68 \\cf0 Title}');
 
+const gnToken = (cands: string[], x: number, y: number, w: number, h: number) =>
+  pb([1, pb([1, vec(x, y)], [2, vec(w, h)])], ...cands.map((c): F => [3, c]), ...cands.map((): F => [4, { f: 0.5 }]));
+
 /** 합성 굿노트 파일 (압축 해제된 형태). 펜·지운 획·형광펜·스티커·사각형·삼각형·텍스트·페이지 텍스트·이미지 포함 */
 export function sampleFiles(withPaper = true) {
   elemSeq = 0;
@@ -110,6 +113,13 @@ export function sampleFiles(withPaper = true) {
     [`notes/${NOTE}`, page],
     ['attachments/ATT-IMG', new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])],
     ['attachments/ATT-TPL', minimalPdf()],
+    // 굿노트 손글씨 인식 결과: "기말 고사" (공백 토큰 포함), 두 번째 단어는 1순위가 틀리고 2순위가 맞음
+    [`search/${NOTE}`, pb(
+      [5, PAGE],
+      [6, gnToken(['기말', '기밀'], 100, 100, 60, 30)],
+      [6, gnToken([' ', ' '], 160, 100, 10, 30)],
+      [6, gnToken(['고시', '고사'], 170, 100, 60, 30)],
+    )],
   ]);
   if (withPaper) {
     files.set(

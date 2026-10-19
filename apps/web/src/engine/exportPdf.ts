@@ -140,7 +140,11 @@ export async function exportPdf(doc: InkDocument, src: ExportSources): Promise<U
       }
       case 'shape':
         traceShape(b, o);
-        pdfPage.drawSvgPath(b.toString(), { x: 0, y: 0, borderColor: hex(o.color), borderWidth: o.width, borderOpacity: o.opacity, borderLineCap: LineCapStyle.Round });
+        pdfPage.drawSvgPath(b.toString(), {
+          x: 0, y: 0, borderLineCap: LineCapStyle.Round,
+          ...(o.fill ? { color: hex(o.fill), opacity: o.opacity } : {}),
+          ...(o.width > 0 ? { borderColor: hex(o.color), borderWidth: o.width, borderOpacity: o.opacity } : {}),
+        });
         break;
       case 'tape':
         traceTape(b, o);

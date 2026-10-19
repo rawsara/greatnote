@@ -50,6 +50,15 @@ export function transformObject<T extends InkObject>(o: T, m: Affine): T {
     case 'tape': {
       const [x1, y1] = affineApply(m, o.x1, o.y1);
       const [x2, y2] = affineApply(m, o.x2, o.y2);
+      if (o.type === 'shape' && o.pts) {
+        const pts = new Array<number>(o.pts.length);
+        for (let i = 0; i + 1 < o.pts.length; i += 2) {
+          const [x, y] = affineApply(m, o.pts[i], o.pts[i + 1]);
+          pts[i] = Math.round(x * 100) / 100;
+          pts[i + 1] = Math.round(y * 100) / 100;
+        }
+        return { ...o, pts, x1, y1, x2, y2, width: o.width * ws };
+      }
       return o.type === 'shape'
         ? { ...o, x1, y1, x2, y2, width: o.width * ws }
         : { ...o, x1, y1, x2, y2, thickness: o.thickness * ws };

@@ -1,4 +1,4 @@
-import type { ImageObj, InkObject, PageBackground, ShapeObj, StrokeObj, TextObj } from '../model';
+import type { HwrWord, ImageObj, InkObject, PageBackground, ShapeObj, StrokeObj, TextObj } from '../model';
 import { simplifyStroke } from '../simplify';
 import { appleLz4, isAppleLz4 } from './lz4';
 import { Msg, readRecords } from './proto';
@@ -39,6 +39,8 @@ export interface GnPage {
   /** z 순서대로 정렬됨 */
   objects: GnObject[];
   paperFromFile: boolean;
+  /** 굿노트가 만들어 둔 손글씨 인식 결과 (search/<노트 id>) — 바로 검색 가능 */
+  hwr?: HwrWord[];
 }
 
 export interface GnImport {
@@ -60,6 +62,31 @@ export interface GnOptions {
 }
 
 const f32 = (v: TplValue) => v as number;
+
+/**
+ * search/<노트 id>: 굿노트의 손글씨 인식 결과 (protobuf 하나).
+ *   5: 페이지 id, 6(반복): 단어 { 1: 영역 {1 원점, 2 크기} (굿노트 단위), 3(반복): 후보 문자열(1순위 먼저) }
+ *   공백·줄바꿈도 단어로 들어 있으므로 건너뛴다.
+ */
+export function readGnSearch(bytes: Uint8Array): HwrWord[] {
+  const out: HwrWord[] = [];
+  const m = new Msg(bytes);
+  for (const f of m.all(6)) {
+    const t = new Msg(f.bytes);
+    const cands = t.all(3).map((c) => new TextDecoder().decode(c.bytes));
+    const best = cands.find((c) => c.trim());
+    if (!best || !cands[0].trim()) continue;
+    const r = t.msg(1);
+    const [x, y] = vec2(r?.msg(1) ?? null);
+    const [w, h] = vec2(r?.msg(2) ?? null);
+    if (!(w > 0 && h > 0)) continue;
+    const word: HwrWord = { t: best, x: x * GN_TO_PT, y: y * GN_TO_PT, w: w * GN_TO_PT, h: h * GN_TO_PT };
+    const alt = [...new Set(cands.filter((c) => c !== best && c.trim()))].slice(0, 4);
+    if (alt.length) word.alt = alt;
+    out.push(word);
+  }
+  return out;
+}
 const rgbaOf = (m: Msg | null): [number, number, number, number] =>
   m ? [m.f32(1) ?? 0, m.f32(2) ?? 0, m.f32(3) ?? 0, m.has(4) ? m.f32(4)! : 1] : [0, 0, 0, 1];
 const hex = (c: number[]) => '#' + c.slice(0, 3).map((x) => Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16).padStart(2, '0')).join('');
@@ -408,7 +435,17 @@ export function convertGoodnotes(files: Map<string, Uint8Array>, opts: GnOptions
       usedAttachments.add(paper.template);
       bg = { kind: 'pdf', assetId: paper.template, pageIndex: paper.templatePage };
     }
-    pages.push({ width: Math.round(W * GN_TO_PT * 100) / 100, height: Math.round(H * GN_TO_PT * 100) / 100, bg, objects, paperFromFile: !!paper });
+    let hwr: HwrWord[] | undefined;
+    const search = files.get(`search/${noteId}`);
+    if (search?.length) {
+      try {
+        hwr = readGnSearch(search);
+        count('손글씨 인식 단어', hwr.length);
+      } catch {
+        count('검색 데이터 해석 실패');
+      }
+    }
+    pages.push({ width: Math.round(W * GN_TO_PT * 100) / 100, height: Math.round(H * GN_TO_PT * 100) / 100, bg, objects, paperFromFile: !!paper, hwr });
   }
 
   if (pages.some((p) => !p.paperFromFile)) warnings.push('용지 크기 정보가 없는 페이지는 A4 기준으로 맞췄습니다 (내용이 넘치면 비율을 유지해 키움)');
